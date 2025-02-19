@@ -3,13 +3,13 @@ package com.eduva.eduva.dto.ClaudeResponse;
 import java.util.List;
 
 public class ClaudeInputData {
-    private List<ClaudeQuestionItem> questions;
+    private List<ClaudeQuestionInfo> questions;
 
-    public List<ClaudeQuestionItem> getQuestions() {
+    public List<ClaudeQuestionInfo> getQuestions() {
         return questions;
     }
 
-    public void setQuestions(List<ClaudeQuestionItem> questions) {
+    public void setQuestions(List<ClaudeQuestionInfo> questions) {
         this.questions = questions;
     }
 }

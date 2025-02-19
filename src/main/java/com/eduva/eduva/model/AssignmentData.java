@@ -1,6 +1,4 @@
 package com.eduva.eduva.model;
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.annotation.JsonRawValue;
 import jakarta.persistence.*;
 import org.hibernate.annotations.Where;
 
@@ -51,7 +49,7 @@ public class AssignmentData{
     private List<FileData> problemSetFiles;
 
     @Column(name = "rubric_content", columnDefinition = "TEXT")
-    private String rubric_content;
+    private String rubricContent;
 
 
     // Getters and Setters
@@ -95,12 +93,12 @@ public class AssignmentData{
         this.dueDate = dueDate;
     }
 
-    public String getRubric_content() {
-        return rubric_content;
+    public String getRubricContent() {
+        return rubricContent;
     }
 
-    public void setRubric_content(String rubric_content) {
-        this.rubric_content = rubric_content;
+    public void setRubricContent(String rubric_content) {
+        this.rubricContent = rubric_content;
     }
 
     public CourseData getCourse() {

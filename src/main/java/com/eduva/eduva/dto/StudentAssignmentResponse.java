@@ -29,7 +29,7 @@ public class StudentAssignmentResponse {
         this.description = assignment.getDescription();
         this.startDate = assignment.getStartDate();
         this.dueDate = assignment.getDueDate();
-        this.rubricContent = assignment.getRubric_content();
+        this.rubricContent = assignment.getRubricContent();
         this.course = assignment.getCourse();
 
 

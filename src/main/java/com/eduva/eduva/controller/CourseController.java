@@ -61,6 +61,7 @@ public class CourseController {
             CourseEnrollmentData joinedCourse = courseEnrollmentService.enrollStudentInCourse(joinCourseRequest.getStudentId(), joinCourseRequest.getCourseCode());
             return ResponseEntity.ok(joinedCourse);
         } catch (Exception e) {
+            System.out.println(e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
 

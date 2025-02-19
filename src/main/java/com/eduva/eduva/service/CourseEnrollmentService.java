@@ -1,16 +1,14 @@
 package com.eduva.eduva.service;
 
-import com.eduva.eduva.model.CourseData;
-import com.eduva.eduva.model.CourseEnrollmentData;
-import com.eduva.eduva.model.UserData;
+import com.eduva.eduva.model.*;
 import com.eduva.eduva.model.enums.EnrollmentStatus;
-import com.eduva.eduva.repository.CourseEnrollmentRepository;
-import com.eduva.eduva.repository.CourseRepository;
-import com.eduva.eduva.repository.UserRepository;
+import com.eduva.eduva.model.enums.SubmissionStatus;
+import com.eduva.eduva.repository.*;
 import jakarta.persistence.EntityNotFoundException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -25,6 +23,10 @@ public class CourseEnrollmentService {
 
     @Autowired
     private CourseEnrollmentRepository enrollmentRepository;
+    @Autowired
+    private AssignmentRepository assignmentRepository;
+    @Autowired
+    private SubmissionRepository submissionRepository;
 
     public CourseEnrollmentData enrollStudentInCourse(Long userId, String courseCode) {
         UserData student = userRepository.findById(userId)
@@ -47,6 +49,19 @@ public class CourseEnrollmentService {
         enrollment.setStudent(student);
         enrollment.setCourse(course);
         enrollment.setStatus(EnrollmentStatus.ACTIVE);
+
+        List<AssignmentData> assignments = assignmentRepository.findByCourseId(course.getId());
+
+        List<SubmissionData> submissions = new ArrayList<>();
+
+        for (AssignmentData assignment : assignments) {
+            SubmissionData submission = new SubmissionData();
+            submission.setAssignment(assignment);
+            submission.setStudent(student);
+            submission.setStatus(SubmissionStatus.NO_SUBMISSION);
+            submissions.add(submission);  // Add each submission to the list
+        }
+        submissionRepository.saveAll(submissions);
 
         return enrollmentRepository.save(enrollment);
     }

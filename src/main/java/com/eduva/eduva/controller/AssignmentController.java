@@ -1,11 +1,11 @@
 package com.eduva.eduva.controller;
 
 import com.eduva.eduva.dto.*;
-import com.eduva.eduva.dto.ClaudeResponse.ClaudeQuestionItem;
+import com.eduva.eduva.dto.ClaudeResponse.ClaudeQuestionInfo;
 import com.eduva.eduva.model.AssignmentData;
 import com.eduva.eduva.model.SubmissionData;
 import com.eduva.eduva.service.AssignmentService;
-import com.eduva.eduva.service.ClaudeService;
+import com.eduva.eduva.service.AzureDocIntelligenceService;
 import com.eduva.eduva.service.FileStorageService;
 import org.apache.coyote.BadRequestException;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -16,8 +16,6 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 
 @RestController
@@ -39,7 +37,7 @@ public class AssignmentController {
     @PostMapping(value = "/teacher/create", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<AssignmentData> createAssignment(@ModelAttribute AssignmentCreateRequest assignmentCreateRequest) {
         try {
-            AssignmentData createdAssignment = assignmentService.createAssignment(assignmentCreateRequest);
+          AssignmentData createdAssignment = assignmentService.createAssignment(assignmentCreateRequest);
             return ResponseEntity.status(HttpStatus.CREATED).body(createdAssignment);
         } catch (ResponseStatusException e) {
             throw e;
@@ -119,14 +117,15 @@ public class AssignmentController {
     }
 
     @PostMapping("autograde/{submissionId}")
-    public ResponseEntity<List<ClaudeQuestionItem>> autoGradeSubmission(@PathVariable Long submissionId) {
+    public ResponseEntity<List<ClaudeQuestionInfo>> autoGradeSubmission(@PathVariable Long submissionId) {
         try{
             System.out.println(submissionId);
-            List<ClaudeQuestionItem> claudeQuestionItemList = assignmentService.autoGrade(submissionId);
+            List<ClaudeQuestionInfo> claudeQuestionItemList = assignmentService.autoGrade(submissionId);
             return ResponseEntity.ok(claudeQuestionItemList);
         } catch(Exception e) {
             System.out.println(e.getMessage());
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Error grading students' response ");
         }
     }
+
 }

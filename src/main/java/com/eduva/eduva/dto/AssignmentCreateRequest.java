@@ -14,6 +14,8 @@ public class AssignmentCreateRequest {
     private String rubric;
     private Long courseId;
     private Long teacherId;
+    private String rubricOption;
+    private String rubricInstruction;
     private List<String> problemSetFileIds;
     private List<String> rubricFileIds;
     private List<MultipartFile> problemSetFiles;  // Added
@@ -49,6 +51,22 @@ public class AssignmentCreateRequest {
 
     public void setDescription(String description) {
         this.description = description;
+    }
+
+    public String getRubricOption() {
+        return rubricOption;
+    }
+
+    public String getRubricInstruction() {
+        return rubricInstruction;
+    }
+
+    public void setRubricInstruction(String rubricInstruction) {
+        this.rubricInstruction = rubricInstruction;
+    }
+
+    public void setRubricOption(String rubricOption) {
+        this.rubricOption = rubricOption;
     }
 
     public String getRubric() {

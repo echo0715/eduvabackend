@@ -1,14 +1,12 @@
 package com.eduva.eduva.service;
 
 import com.eduva.eduva.dto.*;
-import com.eduva.eduva.dto.ClaudeResponse.ClaudeQuestionItem;
+import com.eduva.eduva.dto.ClaudeResponse.ClaudeQuestionInfo;
 import com.eduva.eduva.model.*;
 import com.eduva.eduva.model.enums.EnrollmentStatus;
 import com.eduva.eduva.model.enums.SubmissionStatus;
 import com.eduva.eduva.repository.*;
-import jakarta.persistence.EntityNotFoundException;
-import org.apache.coyote.BadRequestException;
-import org.hibernate.sql.ast.tree.update.Assignment;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -16,7 +14,6 @@ import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -47,6 +44,9 @@ public class AssignmentService {
     @Autowired
     private ClaudeService claudeService;
 
+    @Autowired
+    AzureDocIntelligenceService azureDocIntelligenceService;
+
 
     public AssignmentData createAssignment(AssignmentCreateRequest assignmentCreateRequest) throws IOException {
         CourseData courseData = courseRepository.findById(assignmentCreateRequest.getCourseId())
@@ -56,7 +56,7 @@ public class AssignmentService {
         assignment.setDescription(assignmentCreateRequest.getDescription());
         assignment.setStartDate(assignmentCreateRequest.getStartDate().toLocalDate());
         assignment.setDueDate(assignmentCreateRequest.getDueDate().toLocalDate());
-        assignment.setRubric_content(assignmentCreateRequest.getRubric());
+        assignment.setRubricContent(assignmentCreateRequest.getRubric());
         assignment.setCourse(courseData);
         assignment.setCreatedAt(LocalDateTime.now());
 
@@ -87,6 +87,9 @@ public class AssignmentService {
         }
         assignment.setRubricFiles(rubricFiles);
 
+
+
+
         List<FileData> problemSetFiles = new ArrayList<>();
         if (assignmentCreateRequest.getProblemSetFiles() != null) {
             for (MultipartFile file : assignmentCreateRequest.getProblemSetFiles()) {
@@ -111,19 +114,50 @@ public class AssignmentService {
             }
         }
 
-
         assignment.setProblemSetFiles(problemSetFiles);
 
         List<String> fileUrls = new ArrayList<>();
         for (String filename : allFileName) {
             fileUrls.add(fileStorageService.generatePresignedUrl(filename));
         }
+//
+//        azureDocIntelligenceService.getFormatFigurePosition(fileUrls.get(0));
+        String extractingIdPrompt = "I need to grade each question individually in a question set or an exam, or just an essay. Please identify the small unit of each question that requires separate grading, and output a json file contain those question IDs. In some cases, if there are big problem contain and multiple sub problem like (a),(b), (c) or (1), (2), (3),  please identify the question IDs to the smallest unit, which means like 3, 2(a), 4(1) etc.";
+        List<String> questionIds = claudeService.extractQuestionIds(fileUrls, extractingIdPrompt);
+        String questionIdsString = String.join(",", questionIds);
 
-        String formatQuestionPrompt = "";
-        String rubric_content = claudeService.formatQuestions(fileUrls, formatQuestionPrompt);
-
-        assignment.setRubric_content(rubric_content);
-
+        if (assignmentCreateRequest.getRubricOption().equals("upload")) {
+            String formatQuestionPrompt =
+                    "I will give you some files about a specific problem set and a list of question ids, it can include problems,the rubric, etc. And please do the following:\n" +
+                            "Here is the question ids: " + questionIdsString + "\n" +
+                            "\n" +
+                            "For each of those question id,, please extract the \n" +
+                            "\n" +
+                            "(1) question content\n" +
+                            "\n" +
+                            "(2) The pre context that comes before the question but is related to this question,  for example, question 2(a) and 2(b) may share the same context before them, extract the context for both 2(a) and 2(b), if not, just put an empty string.\n" +
+                            "\n" +
+                            "(3) The rubric details for each question and generate a JSON file containing the question id, the problem content, the corresponding rubric details.\n" +
+                            "\n" +
+                            "(4) The max grade/ Best level for each question, like ‘2 points’, ‘3 points’ or ‘A’, ‘B+’.\n" +
+                            "\n" +
+                            "Note:\n" +
+                            "\n" +
+                            "Preserve all related details from the file.\n" +
+                            "\n" +
+                            "Ensure JSON objects are clearly formatted and structured according to the specifications.\n" +
+                            "\n" +
+                            "Please process all questions mentioned in the question ids!!!";
+            List<ClaudeQuestionInfo> formattedQuestions = claudeService.formatQuestions(fileUrls, formatQuestionPrompt);
+            ObjectMapper objectMapper = new ObjectMapper();
+            String jsonRubricContent = objectMapper.writeValueAsString(formattedQuestions);
+            assignment.setRubricContent(jsonRubricContent);
+        } else if (assignmentCreateRequest.getRubricOption().equals("create")) {
+            List<ClaudeQuestionInfo> formattedQuestions = claudeService.formatQuestionsByAutoGenerateRubrics(fileUrls, questionIds);
+            ObjectMapper objectMapper = new ObjectMapper();
+            String jsonRubricContent = objectMapper.writeValueAsString(formattedQuestions);
+            assignment.setRubricContent(jsonRubricContent);
+        }
 
         AssignmentData savedAssignment = assignmentRepository.save(assignment);
         List<CourseEnrollmentData> activeEnrollments = courseEnrollmentRepository
@@ -152,7 +186,7 @@ public class AssignmentService {
                 .orElseThrow(() -> new RuntimeException("Assignment not found"));
 
         // Directly save the JSON string
-        assignment.setRubric_content(rubricContent);
+        assignment.setRubricContent(rubricContent);
         return assignmentRepository.save(assignment);
     }
 
@@ -206,6 +240,7 @@ public class AssignmentService {
         return submissionRepository.save(submission);
     }
 
+
     public List<ViewSubmissionResponse> getViewAssignment(Long assignmentId){
         AssignmentData assignmentData = assignmentRepository.getById(assignmentId);
         List<ViewSubmissionResponse> responses = new ArrayList<>();
@@ -213,7 +248,6 @@ public class AssignmentService {
         for (SubmissionData submission : submissions) {
             ViewSubmissionResponse response = new ViewSubmissionResponse();
             UserData student = submission.getStudent();
-
             response.setUserId(student.getId());
             response.setSubmissionId(submission.getId());
             response.setUsername(student.getUserName());
@@ -225,7 +259,6 @@ public class AssignmentService {
         }
 
         return responses;
-
     }
 
     public SubmissionData getSubmissionDetails(Long submissionId) {
@@ -243,33 +276,35 @@ public class AssignmentService {
         return submissionData;
     }
 
-    public List<ClaudeQuestionItem> autoGrade(Long submissionId) throws IOException {
+    public List<ClaudeQuestionInfo> autoGrade(Long submissionId) throws IOException {
         SubmissionData submissionData = submissionRepository.findById(submissionId).
                 orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Submssion data not found"));
 
         String studentfileurl = submissionData.getSubmitFileName();
         AssignmentData assignmentData = submissionData.getAssignment();
-        List<FileData> rubricList = assignmentData.getRubricFiles();
+//        List<FileData> rubricList = assignmentData.getRubricFiles();
         List<FileData> problemSetFiles = assignmentData.getProblemSetFiles();
 
+        String rubricContent = assignmentData.getRubricContent();
+
         List<String> fileIds = new ArrayList<>();
-        for (FileData fileData : rubricList) {
-            fileIds.add(fileData.getFileId());
-        }
+//
+//        for (FileData fileData : rubricList) {
+//            fileIds.add(fileData.getFileId());
+//        }
+
         for (FileData fileData : problemSetFiles) {
             fileIds.add(fileData.getFileId());
         }
 
         fileIds.add(studentfileurl);
-        String prompt = "I want you to grade for the questions from the student. There are rubric, scoring and scoring notes in the files, first try to come up with a solution for yourself, then please understand the rubric for each question first and understand the grading and grading notes. Then for the student's response, check the rubric and grade first, and for your grading, please provide with a grade and valid explanation for your grade based on the rubric";
-
         List<String> presignedUrls = new ArrayList<>();
         for (String fileId : fileIds) {
             String presignedUrl = fileStorageService.generatePresignedUrl(fileId);
             presignedUrls.add(presignedUrl);
         }
 
-        return claudeService.callWithFile(presignedUrls, prompt, submissionData);
+        return claudeService.autoGrade(presignedUrls, submissionData, rubricContent);
     }
 
 }
