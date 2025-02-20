@@ -13,14 +13,17 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.io.IOException;
 import java.net.URI;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 @Service
@@ -106,54 +109,18 @@ public class ClaudeService {
         requestBody.put("model", "claude-3-5-sonnet-20241022");
         requestBody.put("max_tokens", 4096);
 
-
-
         List<Map<String, Object>> messages = new ArrayList<>();
         Map<String, Object> message = new HashMap<>();
         message.put("role", "user");
         message.put("content", content);
         messages.add(message);
 
+//        List<Map<String, Object>> tools = createExtractIdTools();
+        List<Map<String, Object>> tools = createQuestionFormatExtractIdAndGenerateRubricTools();
+
+
         requestBody.put("messages", messages);
 
-        List<Map<String, Object>> tools = new ArrayList<>();
-
-        // Modified tool definition for question ID objects
-        Map<String, Object> tool = new HashMap<>();
-        tool.put("name", "question_id_extract");
-        tool.put("description", "Extract all question IDs from the document as objects");
-
-        // Define modified input schema for objects
-        Map<String, Object> inputSchema = new HashMap<>();
-        inputSchema.put("type", "object");
-
-        Map<String, Object> properties = new HashMap<>();
-
-        // Define question_ids array of objects
-        Map<String, Object> questionIdsProps = new HashMap<>();
-        questionIdsProps.put("type", "array");
-
-        // Define the object structure
-        Map<String, Object> itemProperties = new HashMap<>();
-        Map<String, Object> questionIdProp = new HashMap<>();
-        questionIdProp.put("type", "string");
-        questionIdProp.put("description", "A unique question id, e.g. '1', '2(a)', '3(1)' etc.");
-
-        itemProperties.put("question_id", questionIdProp);
-
-        Map<String, Object> itemSchema = new HashMap<>();
-        itemSchema.put("type", "object");
-        itemSchema.put("properties", itemProperties);
-        itemSchema.put("required", List.of("question_id"));
-
-        questionIdsProps.put("items", itemSchema);
-
-        properties.put("questions", questionIdsProps);
-        inputSchema.put("properties", properties);
-        inputSchema.put("required", List.of("questions"));
-
-        tool.put("input_schema", inputSchema);
-        tools.add(tool);
         requestBody.put("tools", tools);
 
         // Return response from API call
@@ -161,41 +128,184 @@ public class ClaudeService {
         return new QuestionIdsWithCacheFiles(questionIds, fileContents);
     }
 
+//    public List<ClaudeQuestionInfo> formatQuestions(List<Map<String, Object>> fileContents, List<String> questionIds, Long teacherId) throws IOException {
+//        if (questionIds.isEmpty()) {
+//            return Collections.emptyList();
+//        }
+//
+//        // Process first question synchronously
+//        ClaudeQuestionInfo firstQuestion = sendRequestForQuestionFormat(fileContents, questionIds.get(0), teacherId);
+//
+//        // If there's only one question, return the result
+//        if (questionIds.size() == 1) {
+//            return List.of(firstQuestion);
+//        }
+//
+//        // Create a list to hold all formatted questions
+//        List<ClaudeQuestionInfo> formattedQuestions = new ArrayList<>();
+//        formattedQuestions.add(firstQuestion);
+//
+//        // Process remaining questions in parallel
+//        List<CompletableFuture<ClaudeQuestionInfo>> futures = questionIds.subList(1, questionIds.size()).stream()
+//                .map(questionId -> CompletableFuture.supplyAsync(() -> {
+//                    try {
+//                        return sendRequestForQuestionFormat(fileContents, questionId, teacherId);
+//                    } catch (IOException e) {
+//                        throw new CompletionException(e);
+//                    }
+//                }))
+//                .toList();
+//
+//        // Wait for all futures to complete and collect results
+//        formattedQuestions.addAll(futures.stream()
+//                .map(CompletableFuture::join)
+//                .filter(Objects::nonNull)
+//                .toList());
+//
+//
+//        return formattedQuestions;
+//    }
     public List<ClaudeQuestionInfo> formatQuestions(List<Map<String, Object>> fileContents, List<String> questionIds, Long teacherId) throws IOException {
         if (questionIds.isEmpty()) {
             return Collections.emptyList();
         }
 
+        List<String> groupedIds = new ArrayList<>();
+        for (int i = 0; i < questionIds.size(); i += 3) {
+            int end = Math.min(i + 3, questionIds.size());
+            String group = String.join(",", questionIds.subList(i, end));
+            groupedIds.add(group);
+        }
+
+        // Create a map to hold results in the correct order
+        Map<String, List<ClaudeQuestionInfo>> resultMap = new ConcurrentHashMap<>();
+
         // Process first question synchronously
-        ClaudeQuestionInfo firstQuestion = sendRequestForQuestionFormat(fileContents, questionIds.get(0), teacherId);
+        ClaudeQuestionInfo firstQuestion;
+        try {
+            firstQuestion = sendRequestForQuestionFormat(fileContents, questionIds.get(0), teacherId);
+            resultMap.put(questionIds.get(0), firstQuestion);
+        } catch (HttpClientErrorException ex) {
+            if (ex.getStatusCode().value() == 429) {
+
+                String retryAfter = ex.getResponseHeaders().getFirst("Retry-After");
+                long secondsToWait = retryAfter != null ? Long.parseLong(retryAfter) : 60;
+                log.warn("Rate limited on first question. Waiting for {} seconds", secondsToWait);
+                try {
+                    Thread.sleep(secondsToWait * 1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while waiting for rate limit to expire", ie);
+                }
+                // Try again after waiting
+                firstQuestion = sendRequestForQuestionFormat(fileContents, questionIds.get(0), teacherId);
+                resultMap.put(questionIds.get(0), firstQuestion);
+            } else {
+                throw new IOException("API error: " + ex.getMessage(), ex);
+            }
+        }
 
         // If there's only one question, return the result
         if (questionIds.size() == 1) {
             return List.of(firstQuestion);
         }
 
-        // Create a list to hold all formatted questions
-        List<ClaudeQuestionInfo> formattedQuestions = new ArrayList<>();
-        formattedQuestions.add(firstQuestion);
+        // Keep track of which questions we've processed
+        Set<String> processedQuestionIds = new HashSet<>();
+        processedQuestionIds.add(questionIds.get(0));
 
-        // Process remaining questions in parallel
-        List<CompletableFuture<ClaudeQuestionInfo>> futures = questionIds.subList(1, questionIds.size()).stream()
-                .map(questionId -> CompletableFuture.supplyAsync(() -> {
-                    try {
-                        return sendRequestForQuestionFormat(fileContents, questionId, teacherId);
-                    } catch (IOException e) {
-                        throw new CompletionException(e);
+        // Create a list of remaining question IDs to process
+        List<String> remainingQuestionIds = new ArrayList<>(questionIds.subList(1, questionIds.size()));
+
+        // Process remaining questions in batches until all are done
+        while (!remainingQuestionIds.isEmpty()) {
+            // Use a thread pool with a reasonable size
+            ExecutorService executor = Executors.newFixedThreadPool(
+                    Math.min(10, remainingQuestionIds.size())
+            );
+
+            // Track if we hit rate limits in this batch
+            AtomicBoolean rateLimited = new AtomicBoolean(false);
+            AtomicLong retryAfterMillis = new AtomicLong(0);
+
+            // Process current batch
+            List<CompletableFuture<Void>> futures = new ArrayList<>();
+            for (String qId : remainingQuestionIds) {
+                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                    if (rateLimited.get()) {
+                        return; // Skip if we already hit rate limit
                     }
-                }))
-                .toList();
 
-        // Wait for all futures to complete and collect results
-        formattedQuestions.addAll(futures.stream()
-                .map(CompletableFuture::join)
-                .filter(Objects::nonNull)
-                .toList());
+                    try {
+                        ClaudeQuestionInfo result = sendRequestForQuestionFormat(fileContents, qId, teacherId);
+                        if (result != null) {
+                            resultMap.put(qId, result);
+                            processedQuestionIds.add(qId);
+                        }
+                    } catch (HttpClientErrorException ex) {
+                        if (ex.getStatusCode().value() == 429) {
+                            String retryAfter = ex.getResponseHeaders().getFirst("Retry-After");
+                            long secondsToWait = retryAfter != null ? Long.parseLong(retryAfter) : 60;
+                            rateLimited.set(true);
+                            retryAfterMillis.set(secondsToWait * 1000);
+                            log.warn("Rate limit hit for question ID: {}. Retry after: {} seconds",
+                                    qId, secondsToWait);
+                        } else {
+                            log.error("API error for question ID {}: {} - {}",
+                                    qId, ex.getStatusCode(), ex.getResponseBodyAsString());
+                        }
+                    } catch (IOException e) {
+                        log.error("Error processing question ID {}: {}", qId, e.getMessage());
+                    }
+                }, executor);
 
-        return formattedQuestions;
+                futures.add(future);
+            }
+
+            // Wait for all futures to complete or a rate limit to be hit
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                    .exceptionally(e -> null)
+                    .join();
+
+            // Create new list of remaining questions
+            remainingQuestionIds = remainingQuestionIds.stream()
+                    .filter(id -> !processedQuestionIds.contains(id))
+                    .collect(Collectors.toList());
+
+            // If we hit a rate limit and didn't make progress, wait
+            if (rateLimited.get() && !remainingQuestionIds.isEmpty()) {
+                long waitTime = retryAfterMillis.get();
+                log.info("Waiting for rate limit to expire: {} ms before resuming batch processing", waitTime);
+                try {
+                    Thread.sleep(waitTime);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while waiting for rate limit to expire", ie);
+                }
+            }
+
+            // Shutdown executor
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException ie) {
+                executor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        // Convert map to ordered list based on original questionIds order
+        List<ClaudeQuestionInfo> orderedResults = new ArrayList<>();
+        for (String qId : questionIds) {
+            ClaudeQuestionInfo info = resultMap.get(qId);
+            if (info != null) {
+                orderedResults.add(info);
+            }
+        }
+
+        return orderedResults;
     }
 
     public List<ClaudeQuestionInfo> formatQuestionsByAutoGenerateRubrics(List<Map<String, Object>> fileContents, List<String> questionIds) throws IOException {
@@ -269,9 +379,9 @@ public class ClaudeService {
 
         // Process the API response
         String responseBody = response.getBody();
-        System.out.println(responseBody);
-        ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
 
+        ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
+        System.out.println(claudeResponseBody);
         List<ClaudeQuestionInfo> questions = new ArrayList<>();
 
         // Process content items and extract generated rubrics
@@ -283,6 +393,84 @@ public class ClaudeService {
 
         return questions;
     }
+
+//    private ClaudeQuestionInfo sendRequestForQuestionFormat(List<Map<String, Object>> fileContents, String questionId, Long teacherId) throws IOException {
+//        String prompt = String.format(
+//                "I will give you some files about a specific problem set and a question id. Please extract the following information for question %s:\n" +
+//                        "\n" +
+//                        "(1) The question content\n" +
+//                        "\n" +
+//                        "(2) The pre-context that comes before the question but is related to this question. For example, question 2(a) and 2(b) may share the same context before them. If there is no context, just put an empty string.\n" +
+//                        "\n" +
+//                        "(3) The rubric details for this question\n" +
+//                        "\n" +
+//                        "(4) The max grade/best level for this question, like '2 points', '3 points' or 'A', 'B+'\n" +
+//                        "\n" +
+//                        "Note:\n" +
+//                        "- Preserve all related details from the file.\n" +
+//                        "- Ensure information is clearly formatted and structured according to the specifications.",
+//                questionId);
+//
+//        List<Map<String, Object>> content = new ArrayList<>(fileContents);
+//
+//        // Add text prompt
+//        Map<String, Object> textContent = new HashMap<>();
+//        textContent.put("type", "text");
+//        textContent.put("text", prompt);
+//        content.add(textContent);
+//
+//        // Create request body
+//        Map<String, Object> requestBody = new HashMap<>();
+//        requestBody.put("model", "claude-3-5-sonnet-20241022");
+//        requestBody.put("max_tokens", 4096);
+//
+//        List<Map<String, Object>> messages = new ArrayList<>();
+//        Map<String, Object> message = new HashMap<>();
+//        message.put("role", "user");
+//        message.put("content", content);
+//        messages.add(message);
+//
+//        requestBody.put("messages", messages);
+//
+//        // Create tools for question formatting
+////        List<Map<String, Object>> tools = createQuestionFormatTools();
+//        List<Map<String, Object>> tools = createQuestionFormatExtractIdAndGenerateRubricTools();
+//        requestBody.put("tools", tools);
+//
+//        // Make API call
+//        HttpHeaders headers = new HttpHeaders();
+//        headers.setContentType(MediaType.APPLICATION_JSON);
+//        headers.set("x-api-key", apiKey);
+//        headers.set("anthropic-version", "2023-06-01");
+//
+//        HttpEntity<String> entity = new HttpEntity<>(
+//                objectMapper.writeValueAsString(requestBody),
+//                headers
+//        );
+//
+//        ResponseEntity<String> response = restTemplate.exchange(
+//                apiUrl,
+//                HttpMethod.POST,
+//                entity,
+//                String.class
+//        );
+//
+//        String responseBody = response.getBody();
+//        ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
+//
+//        System.out.println(claudeResponseBody);
+//
+//        saveUsageData(claudeResponseBody.getUsage(), teacherId);
+//
+//        // Process content items and extract question info
+//        for (ClaudeContentItem item : claudeResponseBody.getContent()) {
+//            if ("tool_use".equals(item.getType()) && item.getInput() != null && !item.getInput().getQuestions().isEmpty()) {
+//                return item.getInput().getQuestions().get(0);
+//            }
+//        }
+//
+//        return null;
+//    }
 
     private ClaudeQuestionInfo sendRequestForQuestionFormat(List<Map<String, Object>> fileContents, String questionId, Long teacherId) throws IOException {
         String prompt = String.format(
@@ -323,7 +511,7 @@ public class ClaudeService {
         requestBody.put("messages", messages);
 
         // Create tools for question formatting
-        List<Map<String, Object>> tools = createQuestionFormatTools();
+        List<Map<String, Object>> tools = createQuestionFormatExtractIdAndGenerateRubricTools();
         requestBody.put("tools", tools);
 
         // Make API call
@@ -337,30 +525,47 @@ public class ClaudeService {
                 headers
         );
 
-        ResponseEntity<String> response = restTemplate.exchange(
-                apiUrl,
-                HttpMethod.POST,
-                entity,
-                String.class
-        );
+        try {
+            ResponseEntity<String> response = restTemplate.exchange(
+                    apiUrl,
+                    HttpMethod.POST,
+                    entity,
+                    String.class
+            );
 
-        String responseBody = response.getBody();
-        ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
+            String responseBody = response.getBody();
+            ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
 
-        System.out.println(claudeResponseBody);
+            log.debug("Response for question ID {}: {}", questionId, claudeResponseBody);
 
-        saveUsageData(claudeResponseBody.getUsage(), teacherId);
+            saveUsageData(claudeResponseBody.getUsage(), teacherId);
 
-        // Process content items and extract question info
-        for (ClaudeContentItem item : claudeResponseBody.getContent()) {
-            if ("tool_use".equals(item.getType()) && item.getInput() != null && !item.getInput().getQuestions().isEmpty()) {
-                return item.getInput().getQuestions().get(0);
+            // Process content items and extract question info
+            for (ClaudeContentItem item : claudeResponseBody.getContent()) {
+                if ("tool_use".equals(item.getType()) && item.getInput() != null && !item.getInput().getQuestions().isEmpty()) {
+                    return item.getInput().getQuestions().get(0);
+                }
             }
+
+            return null;
+        } catch (HttpClientErrorException ex) {
+            if (ex.getStatusCode().value() == 429) {
+                String retryAfter = ex.getResponseHeaders().getFirst("Retry-After");
+                log.warn("Rate limit reached for question ID {}. Retry after: {} seconds",
+                        questionId, retryAfter != null ? retryAfter : "unknown");
+
+                // Let the exception propagate so it can be handled by the rate limiting logic
+                throw ex;
+            } else {
+                log.error("Error calling Anthropic API for question ID {}: {} - {}",
+                        questionId, ex.getStatusCode(), ex.getResponseBodyAsString());
+                throw new IOException("API error: " + ex.getMessage(), ex);
+            }
+        } catch (Exception e) {
+            log.error("Unexpected error processing question ID {}: {}", questionId, e.getMessage(), e);
+            throw new IOException("Error processing request: " + e.getMessage(), e);
         }
-
-        return null;
     }
-
     // Modified API call method
     private List<String> makeQuestionIdApiCall(Map<String, Object> requestBody, Long teacherId) throws IOException {
         HttpHeaders headers = new HttpHeaders();
@@ -383,7 +588,7 @@ public class ClaudeService {
         String responseBody = response.getBody();
 
         ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
-        System.out.println(responseBody);
+        System.out.println(claudeResponseBody);
 
         List<String> questionIds = new ArrayList<>();
 
@@ -448,10 +653,9 @@ public class ClaudeService {
 
         // Process response
         String responseBody = response.getBody();
-        System.out.println("1");
-        System.out.println(responseBody);
-        ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
 
+        ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
+        System.out.println(claudeResponseBody);
         // Process content items and extract question info
         for (ClaudeContentItem item : claudeResponseBody.getContent()) {
             if ("tool_use".equals(item.getType()) && item.getInput() != null) {
@@ -480,7 +684,7 @@ public class ClaudeService {
         List<Map<String, Object>> tools = new ArrayList<>();
         Map<String, Object> tool = new HashMap<>();
         tool.put("name", "rubric_generating_tool");
-        tool.put("description", "Generate a rubric for a specific question");
+        tool.put("description", "Automatically generate a rubric for a specific question");
 
         // Define input schema for grading tool
         Map<String, Object> inputSchema = new HashMap<>();
@@ -659,6 +863,55 @@ public class ClaudeService {
         tool.put("input_schema", inputSchema);
 
         tools.add(tool);
+        return tools;
+    }
+    private List<Map<String,Object>> createExtractIdTools(){
+        List<Map<String, Object>> tools = new ArrayList<>();
+
+        // Modified tool definition for question ID objects
+        Map<String, Object> tool = new HashMap<>();
+        tool.put("name", "question_id_extract");
+        tool.put("description", "Extract all question IDs from the provided document");
+
+        // Define modified input schema for objects
+        Map<String, Object> inputSchema = new HashMap<>();
+        inputSchema.put("type", "object");
+
+        Map<String, Object> properties = new HashMap<>();
+
+        // Define question_ids array of objects
+        Map<String, Object> questionIdsProps = new HashMap<>();
+        questionIdsProps.put("type", "array");
+
+        // Define the object structure
+        Map<String, Object> itemProperties = new HashMap<>();
+        Map<String, Object> questionIdProp = new HashMap<>();
+        questionIdProp.put("type", "string");
+        questionIdProp.put("description", "A unique question id, e.g. '1', '2(a)', '3(1)' etc.");
+
+        itemProperties.put("question_id", questionIdProp);
+
+        Map<String, Object> itemSchema = new HashMap<>();
+        itemSchema.put("type", "object");
+        itemSchema.put("properties", itemProperties);
+        itemSchema.put("required", List.of("question_id"));
+
+        questionIdsProps.put("items", itemSchema);
+
+        properties.put("questions", questionIdsProps);
+        inputSchema.put("properties", properties);
+        inputSchema.put("required", List.of("questions"));
+
+        tool.put("input_schema", inputSchema);
+        tools.add(tool);
+        return tools;
+    }
+
+    private List<Map<String, Object>> createQuestionFormatExtractIdAndGenerateRubricTools(){
+        List<Map<String, Object>> tools = new ArrayList<>();
+        tools.add(createExtractIdTools().get(0));
+        tools.add(createQuestionFormatTools().get(0));
+        tools.add(createRubricGeneratingTools().get(0));
         return tools;
     }
 
