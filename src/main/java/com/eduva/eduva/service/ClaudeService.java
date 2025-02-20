@@ -1,6 +1,7 @@
 package com.eduva.eduva.service;
 
 import com.eduva.eduva.dto.ClaudeResponse.*;
+import com.eduva.eduva.dto.QuestionIdsWithCacheFiles;
 import com.eduva.eduva.model.AnthropicUsage;
 import com.eduva.eduva.model.QuestionGrading;
 import com.eduva.eduva.model.SubmissionData;
@@ -40,8 +41,6 @@ public class ClaudeService {
     private ObjectMapper objectMapper;
     @Autowired
     private AntropicUsageRepository antropicUsageRepository;
-
-    private final Map<String, byte[]> fileCache = new HashMap<>();
 
     public ClaudeService(RestTemplate restTemplate, ObjectMapper objectMapper, QuestionGradingRepository questionGradingRepository) {
         this.restTemplate = restTemplate;
@@ -92,7 +91,7 @@ public class ClaudeService {
         return results;
     }
 
-    public List<String> extractQuestionIds(List<String> fileUrls, String prompt, Long teacherId) throws IOException {
+    public QuestionIdsWithCacheFiles extractQuestionIds(List<String> fileUrls, String prompt, Long teacherId) throws IOException {
         List<Map<String, Object>> fileContents = processFiles(fileUrls);
         List<Map<String, Object>> content = new ArrayList<>(fileContents);
 
@@ -106,6 +105,8 @@ public class ClaudeService {
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", "claude-3-5-sonnet-20241022");
         requestBody.put("max_tokens", 4096);
+
+
 
         List<Map<String, Object>> messages = new ArrayList<>();
         Map<String, Object> message = new HashMap<>();
@@ -156,19 +157,17 @@ public class ClaudeService {
         requestBody.put("tools", tools);
 
         // Return response from API call
-        return makeQuestionIdApiCall(requestBody, teacherId);
+        List<String> questionIds = makeQuestionIdApiCall(requestBody, teacherId);
+        return new QuestionIdsWithCacheFiles(questionIds, fileContents);
     }
 
-    public List<ClaudeQuestionInfo> formatQuestions(List<String> fileUrls, List<String> questionIds, Long teacherId) throws IOException {
+    public List<ClaudeQuestionInfo> formatQuestions(List<Map<String, Object>> fileContents, List<String> questionIds, Long teacherId) throws IOException {
         if (questionIds.isEmpty()) {
             return Collections.emptyList();
         }
 
-        // Process files once
-        List<Map<String, Object>> fileContents = processFiles(fileUrls);
-
         // Process first question synchronously
-        ClaudeQuestionInfo firstQuestion = sendRequestForQuestionFormat(fileUrls, fileContents, questionIds.get(0), teacherId);
+        ClaudeQuestionInfo firstQuestion = sendRequestForQuestionFormat(fileContents, questionIds.get(0), teacherId);
 
         // If there's only one question, return the result
         if (questionIds.size() == 1) {
@@ -183,7 +182,7 @@ public class ClaudeService {
         List<CompletableFuture<ClaudeQuestionInfo>> futures = questionIds.subList(1, questionIds.size()).stream()
                 .map(questionId -> CompletableFuture.supplyAsync(() -> {
                     try {
-                        return sendRequestForQuestionFormat(fileUrls, fileContents, questionId, teacherId);
+                        return sendRequestForQuestionFormat(fileContents, questionId, teacherId);
                     } catch (IOException e) {
                         throw new CompletionException(e);
                     }
@@ -199,7 +198,7 @@ public class ClaudeService {
         return formattedQuestions;
     }
 
-    public List<ClaudeQuestionInfo> formatQuestionsByAutoGenerateRubrics(List<String> fileUrls, List<String> questionIds) throws IOException {
+    public List<ClaudeQuestionInfo> formatQuestionsByAutoGenerateRubrics(List<Map<String, Object>> fileContents, List<String> questionIds) throws IOException {
         if (questionIds.isEmpty()) {
             return Collections.emptyList();
         }
@@ -207,7 +206,7 @@ public class ClaudeService {
 
         List<ClaudeQuestionInfo> formattedQuestions = new ArrayList<>();
 
-        List<ClaudeQuestionInfo> questionResult = sendRequestForRubricGeneration(fileUrls, questionIds.get(0));
+        List<ClaudeQuestionInfo> questionResult = sendRequestForRubricGeneration(fileContents, questionIds.get(0));
         if (!questionResult.isEmpty()) {
             formattedQuestions.add(questionResult.get(0));
         }
@@ -217,7 +216,7 @@ public class ClaudeService {
                 .map(questionId -> CompletableFuture.supplyAsync(() -> {
                     try {
                         // Send request asynchronously for each question
-                        List<ClaudeQuestionInfo> result = sendRequestForRubricGeneration(fileUrls, questionId);
+                        List<ClaudeQuestionInfo> result = sendRequestForRubricGeneration(fileContents, questionId);
                         return result.isEmpty() ? null : result.get(0); // Return the first result or null
                     } catch (IOException e) {
                         throw new CompletionException(e); // Wrap exception in CompletionException
@@ -234,7 +233,7 @@ public class ClaudeService {
         return formattedQuestions;
     }
 
-    private List<ClaudeQuestionInfo> sendRequestForRubricGeneration(List<String> fileUrls, String questionId) throws IOException {
+    private List<ClaudeQuestionInfo> sendRequestForRubricGeneration(List<Map<String, Object>> fileContents, String questionId) throws IOException {
 
         String prompt = String.format("I will give you a file of problem set and an question id. Please generate a grading rubric for question %s. Here are the steps you need to do:\n" +
                 "1. First read this problem and come up with a solution for yourself for this question id.\n" +
@@ -246,8 +245,6 @@ public class ClaudeService {
                     "(3). The rubric content, which contain the main grading criteria like how the grade should be assigned to each question",questionId);
         List<Map<String, Object>> content = new ArrayList<>();
 
-        // Process files once and prepare them for API call
-        List<Map<String, Object>> fileContents = processFiles(fileUrls);
         content.addAll(fileContents);
 
         // Add the rubric generation prompt
@@ -287,7 +284,7 @@ public class ClaudeService {
         return questions;
     }
 
-    private ClaudeQuestionInfo sendRequestForQuestionFormat(List<String> fileUrls, List<Map<String, Object>> fileContents, String questionId, Long teacherId) throws IOException {
+    private ClaudeQuestionInfo sendRequestForQuestionFormat(List<Map<String, Object>> fileContents, String questionId, Long teacherId) throws IOException {
         String prompt = String.format(
                 "I will give you some files about a specific problem set and a question id. Please extract the following information for question %s:\n" +
                         "\n" +
@@ -315,7 +312,7 @@ public class ClaudeService {
         // Create request body
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", "claude-3-5-sonnet-20241022");
-        requestBody.put("max_tokens", 1024);
+        requestBody.put("max_tokens", 4096);
 
         List<Map<String, Object>> messages = new ArrayList<>();
         Map<String, Object> message = new HashMap<>();
@@ -360,8 +357,6 @@ public class ClaudeService {
                 return item.getInput().getQuestions().get(0);
             }
         }
-
-
 
         return null;
     }
