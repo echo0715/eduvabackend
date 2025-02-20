@@ -20,8 +20,8 @@ public class AnthropicUsage {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable = false)
-    private Long courseId;
+    @Column(name = "user_id")
+    private Long userId;
 
     @Column(name = "cache_creation_input_tokens")
     private int cacheCreationInputTokens;
@@ -47,12 +47,12 @@ public class AnthropicUsage {
         this.id = id;
     }
 
-    public Long getCourseId() {
-        return courseId;
+    public Long getUserId() {
+        return userId;
     }
 
-    public void setCourseId(Long courseId) {
-        this.courseId = courseId;
+    public void setUserId(Long userId) {
+        this.userId = userId;
     }
 
     public int getCacheCreationInputTokens() {

@@ -41,40 +41,14 @@ public class ClaudeService {
     @Autowired
     private AntropicUsageRepository antropicUsageRepository;
 
+    private final Map<String, byte[]> fileCache = new HashMap<>();
+
     public ClaudeService(RestTemplate restTemplate, ObjectMapper objectMapper, QuestionGradingRepository questionGradingRepository) {
         this.restTemplate = restTemplate;
         this.objectMapper = objectMapper;
         this.questionGradingRepository = questionGradingRepository;
     }
 
-    /**
-     * Makes an API call to Claude with a file attachment
-     */
-//    public List<ClaudeQuestionInfo> callWithFile(List<String> fileUrls, SubmissionData submissionData, String rubricContent) throws IOException {
-//        List<ClaudeQuestionInfo> questions = objectMapper.readValue(
-//                rubricContent,
-//                objectMapper.getTypeFactory().constructCollectionType(List.class, ClaudeQuestionInfo.class)
-//        );
-//
-//        // Process files once
-//        List<Map<String, Object>> fileContents = processFiles(fileUrls);
-//
-//        // Create CompletableFuture for each question
-//        List<CompletableFuture<ClaudeQuestionInfo>> futures = questions.stream()
-//                .map(question -> CompletableFuture.supplyAsync(() -> {
-//                    try {
-//                        return makeApiCallForQuestion(fileContents, question, submissionData);
-//                    } catch (IOException e) {
-//                        throw new CompletionException(e);
-//                    }
-//                }))
-//                .toList();
-//
-//        // Wait for all futures to complete and collect results in order
-//        return futures.stream()
-//                .map(CompletableFuture::join)
-//                .collect(Collectors.toList());
-//    }
 
     public List<ClaudeQuestionInfo> autoGrade(List<String> fileUrls, SubmissionData submissionData, String rubricContent) throws IOException {
         List<ClaudeQuestionInfo> questions = objectMapper.readValue(
@@ -90,7 +64,7 @@ public class ClaudeService {
         List<Map<String, Object>> fileContents = processFiles(fileUrls);
 
         // Process first question synchronously
-        ClaudeQuestionInfo firstQuestion = makeApiCallForQuestion(fileContents, questions.get(0), submissionData);
+        ClaudeQuestionInfo firstQuestion = makeApiCallForGradeQuestion(fileContents, questions.get(0), submissionData);
 
         // If there's only one question, return the result
         if (questions.size() == 1) {
@@ -101,7 +75,7 @@ public class ClaudeService {
         List<CompletableFuture<ClaudeQuestionInfo>> futures = questions.subList(1, questions.size()).stream()
                 .map(question -> CompletableFuture.supplyAsync(() -> {
                     try {
-                        return makeApiCallForQuestion(fileContents, question, submissionData);
+                        return makeApiCallForGradeQuestion(fileContents, question, submissionData);
                     } catch (IOException e) {
                         throw new CompletionException(e);
                     }
@@ -118,29 +92,9 @@ public class ClaudeService {
         return results;
     }
 
-    public List<String> extractQuestionIds(List<String> fileUrls, String prompt) throws IOException {
-        List<Map<String, Object>> content = new ArrayList<>();
-
-        // Download and encode file
-        for (String fileUrl : fileUrls) {
-            byte[] fileBytes = downloadFile(fileUrl);
-            String base64File = Base64.getEncoder().encodeToString(fileBytes);
-
-            Map<String, Object> fileContent = new HashMap<>();
-            fileContent.put("type", "document");
-
-            Map<String, Object> source = new HashMap<>();
-            source.put("type", "base64");
-            source.put("media_type", determineMediaType(fileUrl));
-            source.put("data", base64File);
-
-            Map<String, Object> cacheControl = new HashMap<>();
-            cacheControl.put("type", "ephemeral");
-            fileContent.put("cache_control", cacheControl);
-
-            fileContent.put("source", source);
-            content.add(fileContent);
-        }
+    public List<String> extractQuestionIds(List<String> fileUrls, String prompt, Long teacherId) throws IOException {
+        List<Map<String, Object>> fileContents = processFiles(fileUrls);
+        List<Map<String, Object>> content = new ArrayList<>(fileContents);
 
         // Add text prompt
         Map<String, Object> textContent = new HashMap<>();
@@ -202,125 +156,47 @@ public class ClaudeService {
         requestBody.put("tools", tools);
 
         // Return response from API call
-        return makeQuestionIdApiCall(requestBody);
+        return makeQuestionIdApiCall(requestBody, teacherId);
     }
 
-    public List<ClaudeQuestionInfo> formatQuestions(List<String> fileUrls, String prompt) throws IOException {
-
-        List<Map<String, Object>> content = new ArrayList<>();
-
-        // Download and encode file
-        for (String fileUrl : fileUrls) {
-            byte[] fileBytes = downloadFile(fileUrl);
-            String base64File = Base64.getEncoder().encodeToString(fileBytes);
-
-            Map<String, Object> fileContent = new HashMap<>();
-            fileContent.put("type", "document");
-
-            Map<String, Object> source = new HashMap<>();
-            source.put("type", "base64");
-            source.put("media_type", determineMediaType(fileUrl));
-            source.put("data", base64File);
-
-            Map<String, Object> cacheControl = new HashMap<>();
-            cacheControl.put("type", "ephemeral");
-            fileContent.put("cache_control", cacheControl);
-
-            fileContent.put("source", source);
-            content.add(fileContent);
+    public List<ClaudeQuestionInfo> formatQuestions(List<String> fileUrls, List<String> questionIds, Long teacherId) throws IOException {
+        if (questionIds.isEmpty()) {
+            return Collections.emptyList();
         }
 
-        // Add text prompt
-        Map<String, Object> textContent = new HashMap<>();
-        textContent.put("type", "text");
-        textContent.put("text", prompt);
-        content.add(textContent);
+        // Process files once
+        List<Map<String, Object>> fileContents = processFiles(fileUrls);
 
-        // Create request body
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", "claude-3-5-sonnet-20241022");
-        requestBody.put("max_tokens", 4096);
+        // Process first question synchronously
+        ClaudeQuestionInfo firstQuestion = sendRequestForQuestionFormat(fileUrls, fileContents, questionIds.get(0), teacherId);
 
-        List<Map<String, Object>> messages = new ArrayList<>();
-        Map<String, Object> message = new HashMap<>();
-        message.put("role", "user");
-        message.put("content", content);
-        messages.add(message);
+        // If there's only one question, return the result
+        if (questionIds.size() == 1) {
+            return List.of(firstQuestion);
+        }
 
-        requestBody.put("messages", messages);
-        List<Map<String, Object>> tools = new ArrayList<>();
+        // Create a list to hold all formatted questions
+        List<ClaudeQuestionInfo> formattedQuestions = new ArrayList<>();
+        formattedQuestions.add(firstQuestion);
 
-        // Tool definition (grading tool for the new functionality)
-        Map<String, Object> tool = new HashMap<>();
-        tool.put("name", "question_format");
-        tool.put("description", "For each question, format the question in a clear way including the question id, the question content, the question rubric");
+        // Process remaining questions in parallel
+        List<CompletableFuture<ClaudeQuestionInfo>> futures = questionIds.subList(1, questionIds.size()).stream()
+                .map(questionId -> CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return sendRequestForQuestionFormat(fileUrls, fileContents, questionId, teacherId);
+                    } catch (IOException e) {
+                        throw new CompletionException(e);
+                    }
+                }))
+                .toList();
 
-        // Define input schema for grading tool
-        Map<String, Object> inputSchema = new HashMap<>();
-        inputSchema.put("type", "object");
+        // Wait for all futures to complete and collect results
+        formattedQuestions.addAll(futures.stream()
+                .map(CompletableFuture::join)
+                .filter(Objects::nonNull)
+                .toList());
 
-        Map<String, Object> questionsProps = new HashMap<>();
-        questionsProps.put("type", "array");
-
-        // Each question is represented as an object
-        Map<String, Object> questionItem = new HashMap<>();
-        questionItem.put("type", "object");
-
-        // Add properties for question_id, content, and rubric
-        Map<String, Object> questionItemProperties = new HashMap<>();
-
-        // question_id
-        Map<String, Object> questionIdDef = new HashMap<>();
-        questionIdDef.put("type", "string");
-        questionIdDef.put("description", "A unique question id, e.g. '1', '2(a)', '3(1)' etc.");
-        questionItemProperties.put("question_id", questionIdDef);
-
-        // content
-        Map<String, Object> contentDef = new HashMap<>();
-        contentDef.put("type", "string");
-        contentDef.put("description", "The content or the text of the question.");
-        questionItemProperties.put("content", contentDef);
-
-        // rubric
-        Map<String, Object> rubricDef = new HashMap<>();
-        rubricDef.put("type", "string");
-        rubricDef.put("description", "The grading rubric for the question, outlining how grades are assigned.");
-        questionItemProperties.put("rubric", rubricDef);
-
-        Map<String, Object> maxGrade = new HashMap<>();
-        rubricDef.put("type", "string");
-        rubricDef.put("description", "The best grade or the full points that this question can give, e.g. 'A', 'B+', '3 points', '1 points', etc.");
-        questionItemProperties.put("maxGrade", maxGrade);
-
-        Map<String, Object> preContext = new HashMap<>();
-        preContext.put("type", "string");
-        preContext.put("description", "The context for the question.");
-
-        questionItemProperties.put("preContext", preContext);
-
-
-        // Define the required fields inside each question object
-        questionItem.put("properties", questionItemProperties);
-        questionItem.put("required", List.of("question_id", "content", "rubric", "maxGrade", "preContext"));
-
-        // The questions array itself
-        questionsProps.put("items", questionItem);
-
-        // "questions" top-level property
-        Map<String, Object> topLevelProperties = new HashMap<>();
-        topLevelProperties.put("questions", questionsProps);
-
-        // Add to inputSchema
-        inputSchema.put("properties", topLevelProperties);
-        inputSchema.put("required", List.of("questions"));
-        tool.put("input_schema", inputSchema);
-
-        tools.add(tool);
-        requestBody.put("tools", tools);
-
-
-        // Return response from API call
-        return makeFileReformatApiCall(requestBody);
+        return formattedQuestions;
     }
 
     public List<ClaudeQuestionInfo> formatQuestionsByAutoGenerateRubrics(List<String> fileUrls, List<String> questionIds) throws IOException {
@@ -411,8 +287,49 @@ public class ClaudeService {
         return questions;
     }
 
+    private ClaudeQuestionInfo sendRequestForQuestionFormat(List<String> fileUrls, List<Map<String, Object>> fileContents, String questionId, Long teacherId) throws IOException {
+        String prompt = String.format(
+                "I will give you some files about a specific problem set and a question id. Please extract the following information for question %s:\n" +
+                        "\n" +
+                        "(1) The question content\n" +
+                        "\n" +
+                        "(2) The pre-context that comes before the question but is related to this question. For example, question 2(a) and 2(b) may share the same context before them. If there is no context, just put an empty string.\n" +
+                        "\n" +
+                        "(3) The rubric details for this question\n" +
+                        "\n" +
+                        "(4) The max grade/best level for this question, like '2 points', '3 points' or 'A', 'B+'\n" +
+                        "\n" +
+                        "Note:\n" +
+                        "- Preserve all related details from the file.\n" +
+                        "- Ensure information is clearly formatted and structured according to the specifications.",
+                questionId);
 
-    private List<ClaudeQuestionInfo> makeFileReformatApiCall(Map<String, Object> requestBody) throws IOException {
+        List<Map<String, Object>> content = new ArrayList<>(fileContents);
+
+        // Add text prompt
+        Map<String, Object> textContent = new HashMap<>();
+        textContent.put("type", "text");
+        textContent.put("text", prompt);
+        content.add(textContent);
+
+        // Create request body
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("model", "claude-3-5-sonnet-20241022");
+        requestBody.put("max_tokens", 1024);
+
+        List<Map<String, Object>> messages = new ArrayList<>();
+        Map<String, Object> message = new HashMap<>();
+        message.put("role", "user");
+        message.put("content", content);
+        messages.add(message);
+
+        requestBody.put("messages", messages);
+
+        // Create tools for question formatting
+        List<Map<String, Object>> tools = createQuestionFormatTools();
+        requestBody.put("tools", tools);
+
+        // Make API call
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.set("x-api-key", apiKey);
@@ -431,23 +348,26 @@ public class ClaudeService {
         );
 
         String responseBody = response.getBody();
-
         ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
-        System.out.println(responseBody);
 
-        List<ClaudeQuestionInfo> questions = List.of();
-        // Process content items and extract questions
+        System.out.println(claudeResponseBody);
+
+        saveUsageData(claudeResponseBody.getUsage(), teacherId);
+
+        // Process content items and extract question info
         for (ClaudeContentItem item : claudeResponseBody.getContent()) {
-            if ("tool_use".equals(item.getType()) && item.getInput() != null) {
-                // Convert and filter questions to grading items
-                questions = item.getInput().getQuestions();
+            if ("tool_use".equals(item.getType()) && item.getInput() != null && !item.getInput().getQuestions().isEmpty()) {
+                return item.getInput().getQuestions().get(0);
             }
         }
-        return questions;
+
+
+
+        return null;
     }
 
     // Modified API call method
-    private List<String> makeQuestionIdApiCall(Map<String, Object> requestBody) throws IOException {
+    private List<String> makeQuestionIdApiCall(Map<String, Object> requestBody, Long teacherId) throws IOException {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.set("x-api-key", apiKey);
@@ -482,36 +402,12 @@ public class ClaudeService {
             }
         }
         System.out.println(questionIds);
-        System.out.println(questionIds.size());
-        System.out.println("hhh");
+
+        saveUsageData(claudeResponseBody.getUsage(), teacherId);
         return questionIds;
     }
 
-    private List<Map<String, Object>> processFiles(List<String> fileUrls) throws IOException {
-        List<Map<String, Object>> fileContents = new ArrayList<>();
-        for (String fileUrl : fileUrls) {
-            byte[] fileBytes = downloadFile(fileUrl);
-            String base64File = Base64.getEncoder().encodeToString(fileBytes);
-
-            Map<String, Object> fileContent = new HashMap<>();
-            fileContent.put("type", "document");
-
-            Map<String, Object> source = new HashMap<>();
-            source.put("type", "base64");
-            source.put("media_type", determineMediaType(fileUrl));
-            source.put("data", base64File);
-
-            Map<String, Object> cacheControl = new HashMap<>();
-            cacheControl.put("type", "ephemeral");
-            fileContent.put("cache_control", cacheControl);
-
-            fileContent.put("source", source);
-            fileContents.add(fileContent);
-        }
-        return fileContents;
-    }
-
-    private ClaudeQuestionInfo makeApiCallForQuestion(List<Map<String, Object>> fileContents,
+    private ClaudeQuestionInfo makeApiCallForGradeQuestion(List<Map<String, Object>> fileContents,
                                                       ClaudeQuestionInfo question, SubmissionData submissionData) throws IOException {
 
         List<Map<String, Object>> content = new ArrayList<>(fileContents);
@@ -535,7 +431,7 @@ public class ClaudeService {
         textContent.put("text", questionPrompt);
         content.add(textContent);
         // Create request body
-        Map<String, Object> requestBody = createRequestBody(content);
+        Map<String, Object> requestBody = createGradeRequestBody(content);
 
         // Make API call
         HttpHeaders headers = new HttpHeaders();
@@ -575,7 +471,8 @@ public class ClaudeService {
                 grading.setQuestionId(gradedQuestion.getQuestionId());
                 questionGradingRepository.save(grading);
                 // Save usage data
-                saveUsageData(claudeResponseBody.getUsage(), submissionData);
+                Long teacherId = submissionData.getAssignment().getCourse().getTeacher().getId();
+                saveUsageData(claudeResponseBody.getUsage(), teacherId);
 
                 return gradedQuestion;
             }
@@ -652,7 +549,7 @@ public class ClaudeService {
         tools.add(tool);
         return tools;
     }
-    private List<Map<String, Object>> createTools() {
+    private List<Map<String, Object>> createGradeTools() {
         List<Map<String, Object>> tools = new ArrayList<>();
         Map<String, Object> tool = new HashMap<>();
         tool.put("name", "grading_tool");
@@ -699,18 +596,79 @@ public class ClaudeService {
         tools.add(tool);
         return tools;
     }
+    private List<Map<String, Object>> createQuestionFormatTools() {
+        List<Map<String, Object>> tools = new ArrayList<>();
+        Map<String, Object> tool = new HashMap<>();
+        tool.put("name", "question_format");
+        tool.put("description", "Format the question details including the question id, content, pre-context, rubric, and max grade");
 
-    private void saveUsageData(ClaudeUsage claudeUsage, SubmissionData submissionData) {
-        AnthropicUsage anthropicUsage = new AnthropicUsage();
-        anthropicUsage.setCourseId(submissionData.getAssignment().getCourse().getId());
-        anthropicUsage.setCacheReadInputTokens(claudeUsage.getCache_read_input_tokens());
-        anthropicUsage.setInputTokens(claudeUsage.getInput_tokens());
-        anthropicUsage.setOutputTokens(claudeUsage.getOutput_tokens());
-        anthropicUsage.setCacheCreationInputTokens(claudeUsage.getCache_creation_input_tokens());
-        antropicUsageRepository.save(anthropicUsage);
+        // Define input schema for the tool
+        Map<String, Object> inputSchema = new HashMap<>();
+        inputSchema.put("type", "object");
+
+        // Define the questions array
+        Map<String, Object> questionsProps = new HashMap<>();
+        questionsProps.put("type", "array");
+
+        // Define question item structure
+        Map<String, Object> questionItem = new HashMap<>();
+        questionItem.put("type", "object");
+
+        // Define question properties
+        Map<String, Object> questionItemProperties = new HashMap<>();
+
+        // question_id
+        Map<String, Object> questionIdDef = new HashMap<>();
+        questionIdDef.put("type", "string");
+        questionIdDef.put("description", "A unique question id, e.g. '1', '2(a)', '3(1)' etc.");
+        questionItemProperties.put("question_id", questionIdDef);
+
+        // content
+        Map<String, Object> contentDef = new HashMap<>();
+        contentDef.put("type", "string");
+        contentDef.put("description", "The content or the text of the question.");
+        questionItemProperties.put("content", contentDef);
+
+        // rubric
+        Map<String, Object> rubricDef = new HashMap<>();
+        rubricDef.put("type", "string");
+        rubricDef.put("description", "The grading rubric for the question, outlining how grades are assigned.");
+        questionItemProperties.put("rubric", rubricDef);
+
+        // maxGrade
+        Map<String, Object> maxGradeDef = new HashMap<>();
+        maxGradeDef.put("type", "string");
+        maxGradeDef.put("description", "The best grade or the full points that this question can give, e.g. 'A', 'B+', '3 points', '1 points', etc.");
+        questionItemProperties.put("maxGrade", maxGradeDef);
+
+        // preContext
+        Map<String, Object> preContextDef = new HashMap<>();
+        preContextDef.put("type", "string");
+        preContextDef.put("description", "The context for the question.");
+        questionItemProperties.put("preContext", preContextDef);
+
+        // Define required fields
+        questionItem.put("properties", questionItemProperties);
+        questionItem.put("required", List.of("question_id", "content", "rubric", "maxGrade", "preContext"));
+
+        // Add question item to questions array
+        questionsProps.put("items", questionItem);
+
+        // Add questions to top-level properties
+        Map<String, Object> topLevelProperties = new HashMap<>();
+        topLevelProperties.put("questions", questionsProps);
+
+        // Finalize input schema
+        inputSchema.put("properties", topLevelProperties);
+        inputSchema.put("required", List.of("questions"));
+        tool.put("input_schema", inputSchema);
+
+        tools.add(tool);
+        return tools;
     }
 
-    private Map<String, Object> createRequestBody(List<Map<String, Object>> content) {
+
+    private Map<String, Object> createGradeRequestBody(List<Map<String, Object>> content) {
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", "claude-3-5-sonnet-20241022");
         requestBody.put("max_tokens", 1024);
@@ -722,11 +680,10 @@ public class ClaudeService {
         messages.add(message);
         requestBody.put("messages", messages);
 
-        requestBody.put("tools", createTools());
+        requestBody.put("tools", createGradeTools());
 
         return requestBody;
     }
-
     private Map<String, Object> createRubricGeneratingRequestBody(List<Map<String, Object>> content) {
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", "claude-3-5-sonnet-20241022");
@@ -742,8 +699,41 @@ public class ClaudeService {
         requestBody.put("tools", createRubricGeneratingTools());
         return requestBody;
     }
+    private List<Map<String, Object>> processFiles(List<String> fileUrls) throws IOException {
+        List<Map<String, Object>> fileContents = new ArrayList<>();
+        for (String fileUrl : fileUrls) {
+            byte[] fileBytes = downloadFile(fileUrl);
+            String base64File = Base64.getEncoder().encodeToString(fileBytes);
 
-    private byte[] downloadFile(String fileUrl) throws IOException {
+            Map<String, Object> fileContent = new HashMap<>();
+            fileContent.put("type", "document");
+
+            Map<String, Object> source = new HashMap<>();
+            source.put("type", "base64");
+            source.put("media_type", determineMediaType(fileUrl));
+            source.put("data", base64File);
+
+            Map<String, Object> cacheControl = new HashMap<>();
+            cacheControl.put("type", "ephemeral");
+            fileContent.put("cache_control", cacheControl);
+
+            fileContent.put("source", source);
+            fileContents.add(fileContent);
+        }
+        return fileContents;
+    }
+    private void saveUsageData(ClaudeUsage claudeUsage, Long teacherId) {
+        AnthropicUsage anthropicUsage = new AnthropicUsage();
+        anthropicUsage.setUserId(teacherId);
+        anthropicUsage.setCacheReadInputTokens(claudeUsage.getCache_read_input_tokens());
+        anthropicUsage.setInputTokens(claudeUsage.getInput_tokens());
+        anthropicUsage.setOutputTokens(claudeUsage.getOutput_tokens());
+        anthropicUsage.setCacheCreationInputTokens(claudeUsage.getCache_creation_input_tokens());
+        antropicUsageRepository.save(anthropicUsage);
+    }
+
+
+    public byte[] downloadFile(String fileUrl) throws IOException {
 //        ResponseEntity<byte[]> response = restTemplate.getForEntity(fileUrl, byte[].class);
         URI uri = UriComponentsBuilder.fromHttpUrl(fileUrl)
                 .build(true)  // 'true' = don't re-encode the parameters

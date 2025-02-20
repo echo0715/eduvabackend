@@ -120,35 +120,14 @@ public class AssignmentService {
         for (String filename : allFileName) {
             fileUrls.add(fileStorageService.generatePresignedUrl(filename));
         }
-//
 //        azureDocIntelligenceService.getFormatFigurePosition(fileUrls.get(0));
+
         String extractingIdPrompt = "I need to grade each question individually in a question set or an exam, or just an essay. Please identify the small unit of each question that requires separate grading, and output a json file contain those question IDs. In some cases, if there are big problem contain and multiple sub problem like (a),(b), (c) or (1), (2), (3),  please identify the question IDs to the smallest unit, which means like 3, 2(a), 4(1) etc.";
-        List<String> questionIds = claudeService.extractQuestionIds(fileUrls, extractingIdPrompt);
+        List<String> questionIds = claudeService.extractQuestionIds(fileUrls, extractingIdPrompt, assignmentCreateRequest.getTeacherId());
         String questionIdsString = String.join(",", questionIds);
 
         if (assignmentCreateRequest.getRubricOption().equals("upload")) {
-            String formatQuestionPrompt =
-                    "I will give you some files about a specific problem set and a list of question ids, it can include problems,the rubric, etc. And please do the following:\n" +
-                            "Here is the question ids: " + questionIdsString + "\n" +
-                            "\n" +
-                            "For each of those question id,, please extract the \n" +
-                            "\n" +
-                            "(1) question content\n" +
-                            "\n" +
-                            "(2) The pre context that comes before the question but is related to this question,  for example, question 2(a) and 2(b) may share the same context before them, extract the context for both 2(a) and 2(b), if not, just put an empty string.\n" +
-                            "\n" +
-                            "(3) The rubric details for each question and generate a JSON file containing the question id, the problem content, the corresponding rubric details.\n" +
-                            "\n" +
-                            "(4) The max grade/ Best level for each question, like ‘2 points’, ‘3 points’ or ‘A’, ‘B+’.\n" +
-                            "\n" +
-                            "Note:\n" +
-                            "\n" +
-                            "Preserve all related details from the file.\n" +
-                            "\n" +
-                            "Ensure JSON objects are clearly formatted and structured according to the specifications.\n" +
-                            "\n" +
-                            "Please process all questions mentioned in the question ids!!!";
-            List<ClaudeQuestionInfo> formattedQuestions = claudeService.formatQuestions(fileUrls, formatQuestionPrompt);
+            List<ClaudeQuestionInfo> formattedQuestions = claudeService.formatQuestions(fileUrls, questionIds, assignmentCreateRequest.getTeacherId());
             ObjectMapper objectMapper = new ObjectMapper();
             String jsonRubricContent = objectMapper.writeValueAsString(formattedQuestions);
             assignment.setRubricContent(jsonRubricContent);
