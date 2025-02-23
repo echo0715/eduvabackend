@@ -107,7 +107,7 @@ public class ClaudeService {
         // Create request body
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", "claude-3-5-sonnet-20241022");
-        requestBody.put("max_tokens", 4096);
+        requestBody.put("max_tokens", 1024);
 
         List<Map<String, Object>> messages = new ArrayList<>();
         Map<String, Object> message = new HashMap<>();
@@ -181,10 +181,10 @@ public class ClaudeService {
         Map<String, List<ClaudeQuestionInfo>> resultMap = new ConcurrentHashMap<>();
 
         // Process first question synchronously
-        ClaudeQuestionInfo firstQuestion;
+        List<ClaudeQuestionInfo> firstBatch;
         try {
-            firstQuestion = sendRequestForQuestionFormat(fileContents, questionIds.get(0), teacherId);
-            resultMap.put(questionIds.get(0), firstQuestion);
+            firstBatch = sendRequestForQuestionFormat(fileContents, groupedIds.get(0), teacherId);
+            resultMap.put(groupedIds.get(0), firstBatch);
         } catch (HttpClientErrorException ex) {
             if (ex.getStatusCode().value() == 429) {
 
@@ -198,24 +198,26 @@ public class ClaudeService {
                     throw new IOException("Interrupted while waiting for rate limit to expire", ie);
                 }
                 // Try again after waiting
-                firstQuestion = sendRequestForQuestionFormat(fileContents, questionIds.get(0), teacherId);
-                resultMap.put(questionIds.get(0), firstQuestion);
+                firstBatch = sendRequestForQuestionFormat(fileContents, groupedIds.get(0), teacherId);
+                resultMap.put(groupedIds.get(0), firstBatch);
             } else {
                 throw new IOException("API error: " + ex.getMessage(), ex);
             }
         }
 
         // If there's only one question, return the result
-        if (questionIds.size() == 1) {
-            return List.of(firstQuestion);
+        if (groupedIds.size() == 1) {
+            return firstBatch;
         }
 
         // Keep track of which questions we've processed
-        Set<String> processedQuestionIds = new HashSet<>();
-        processedQuestionIds.add(questionIds.get(0));
+//        Set<String> processedQuestionIds = new HashSet<>();
+
+        Set<String> processedQuestionIds = Collections.synchronizedSet(new HashSet<>());
+        processedQuestionIds.add(groupedIds.get(0));
 
         // Create a list of remaining question IDs to process
-        List<String> remainingQuestionIds = new ArrayList<>(questionIds.subList(1, questionIds.size()));
+        List<String> remainingQuestionIds = new ArrayList<>(groupedIds.subList(1, groupedIds.size()));
 
         // Process remaining questions in batches until all are done
         while (!remainingQuestionIds.isEmpty()) {
@@ -230,17 +232,17 @@ public class ClaudeService {
 
             // Process current batch
             List<CompletableFuture<Void>> futures = new ArrayList<>();
-            for (String qId : remainingQuestionIds) {
+            for (String qIds : remainingQuestionIds) {
                 CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
                     if (rateLimited.get()) {
                         return; // Skip if we already hit rate limit
                     }
 
                     try {
-                        ClaudeQuestionInfo result = sendRequestForQuestionFormat(fileContents, qId, teacherId);
+                        List<ClaudeQuestionInfo> result = sendRequestForQuestionFormat(fileContents, qIds, teacherId);
                         if (result != null) {
-                            resultMap.put(qId, result);
-                            processedQuestionIds.add(qId);
+                            resultMap.put(qIds, result);
+                            processedQuestionIds.add(qIds);
                         }
                     } catch (HttpClientErrorException ex) {
                         if (ex.getStatusCode().value() == 429) {
@@ -249,13 +251,13 @@ public class ClaudeService {
                             rateLimited.set(true);
                             retryAfterMillis.set(secondsToWait * 1000);
                             log.warn("Rate limit hit for question ID: {}. Retry after: {} seconds",
-                                    qId, secondsToWait);
+                                    qIds, secondsToWait);
                         } else {
                             log.error("API error for question ID {}: {} - {}",
-                                    qId, ex.getStatusCode(), ex.getResponseBodyAsString());
+                                    qIds, ex.getStatusCode(), ex.getResponseBodyAsString());
                         }
                     } catch (IOException e) {
-                        log.error("Error processing question ID {}: {}", qId, e.getMessage());
+                        log.error("Error processing question ID {}: {}", qIds, e.getMessage());
                     }
                 }, executor);
 
@@ -268,9 +270,15 @@ public class ClaudeService {
                     .join();
 
             // Create new list of remaining questions
-            remainingQuestionIds = remainingQuestionIds.stream()
-                    .filter(id -> !processedQuestionIds.contains(id))
-                    .collect(Collectors.toList());
+//            remainingQuestionIds = remainingQuestionIds.stream()
+//                    .filter(ids -> !processedQuestionIds.contains(ids))
+//                    .collect(Collectors.toList());
+
+            synchronized (processedQuestionIds) {
+                remainingQuestionIds = remainingQuestionIds.stream()
+                        .filter(ids -> !processedQuestionIds.contains(ids))
+                        .collect(Collectors.toList());
+            }
 
             // If we hit a rate limit and didn't make progress, wait
             if (rateLimited.get() && !remainingQuestionIds.isEmpty()) {
@@ -298,10 +306,10 @@ public class ClaudeService {
 
         // Convert map to ordered list based on original questionIds order
         List<ClaudeQuestionInfo> orderedResults = new ArrayList<>();
-        for (String qId : questionIds) {
-            ClaudeQuestionInfo info = resultMap.get(qId);
+        for (String qIds : groupedIds) {
+            List<ClaudeQuestionInfo> info = resultMap.get(qIds);
             if (info != null) {
-                orderedResults.add(info);
+                orderedResults.addAll(info);
             }
         }
 
@@ -472,9 +480,9 @@ public class ClaudeService {
 //        return null;
 //    }
 
-    private ClaudeQuestionInfo sendRequestForQuestionFormat(List<Map<String, Object>> fileContents, String questionId, Long teacherId) throws IOException {
+    private List<ClaudeQuestionInfo> sendRequestForQuestionFormat(List<Map<String, Object>> fileContents, String questionIds, Long teacherId) throws IOException {
         String prompt = String.format(
-                "I will give you some files about a specific problem set and a question id. Please extract the following information for question %s:\n" +
+                "I will give you some files about a specific problem set, and here are some given question ids: %s. For each of the given question id, please format the question information according to the following:\n" +
                         "\n" +
                         "(1) The question content\n" +
                         "\n" +
@@ -484,10 +492,12 @@ public class ClaudeService {
                         "\n" +
                         "(4) The max grade/best level for this question, like '2 points', '3 points' or 'A', 'B+'\n" +
                         "\n" +
+                        "Here are the question ids: %s \n" +
                         "Note:\n" +
                         "- Preserve all related details from the file.\n" +
-                        "- Ensure information is clearly formatted and structured according to the specifications.",
-                questionId);
+                        "- Ensure information is clearly formatted and structured according to the question_format tool." +
+                        "- Ensure that all of the given question ids's information have been included in the final json according to the question_format tool.\n.",
+                questionIds, questionIds);
 
         List<Map<String, Object>> content = new ArrayList<>(fileContents);
 
@@ -534,16 +544,18 @@ public class ClaudeService {
             );
 
             String responseBody = response.getBody();
+            System.out.println(responseBody);
             ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
 
-            log.debug("Response for question ID {}: {}", questionId, claudeResponseBody);
+            System.out.println("Response for question ID: " + questionIds +
+                    "    " + objectMapper.writeValueAsString(claudeResponseBody));
 
             saveUsageData(claudeResponseBody.getUsage(), teacherId);
 
             // Process content items and extract question info
             for (ClaudeContentItem item : claudeResponseBody.getContent()) {
                 if ("tool_use".equals(item.getType()) && item.getInput() != null && !item.getInput().getQuestions().isEmpty()) {
-                    return item.getInput().getQuestions().get(0);
+                    return item.getInput().getQuestions();
                 }
             }
 
@@ -552,17 +564,17 @@ public class ClaudeService {
             if (ex.getStatusCode().value() == 429) {
                 String retryAfter = ex.getResponseHeaders().getFirst("Retry-After");
                 log.warn("Rate limit reached for question ID {}. Retry after: {} seconds",
-                        questionId, retryAfter != null ? retryAfter : "unknown");
+                        questionIds, retryAfter != null ? retryAfter : "unknown");
 
                 // Let the exception propagate so it can be handled by the rate limiting logic
                 throw ex;
             } else {
                 log.error("Error calling Anthropic API for question ID {}: {} - {}",
-                        questionId, ex.getStatusCode(), ex.getResponseBodyAsString());
+                        questionIds, ex.getStatusCode(), ex.getResponseBodyAsString());
                 throw new IOException("API error: " + ex.getMessage(), ex);
             }
         } catch (Exception e) {
-            log.error("Unexpected error processing question ID {}: {}", questionId, e.getMessage(), e);
+            log.error("Unexpected error processing question ID {}: {}", questionIds, e.getMessage(), e);
             throw new IOException("Error processing request: " + e.getMessage(), e);
         }
     }
@@ -656,6 +668,9 @@ public class ClaudeService {
 
         ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
         System.out.println(claudeResponseBody);
+
+        saveUsageData(claudeResponseBody.getUsage(), submissionData.getAssignment().getCourse().getTeacher().getId());
+
         // Process content items and extract question info
         for (ClaudeContentItem item : claudeResponseBody.getContent()) {
             if ("tool_use".equals(item.getType()) && item.getInput() != null) {
