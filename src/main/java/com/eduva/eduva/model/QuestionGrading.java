@@ -27,6 +27,8 @@ public class QuestionGrading {
 
     private String grade;
 
+    private Integer question_order;
+
      @Lob
      @Column(columnDefinition = "TEXT")
     private String explanation;
@@ -77,5 +79,13 @@ public class QuestionGrading {
 
     public void setExplanation(String explanation) {
         this.explanation = explanation;
+    }
+
+    public Integer getQuestion_order() {
+        return question_order;
+    }
+
+    public void setQuestion_order(Integer question_order) {
+        this.question_order = question_order;
     }
 }

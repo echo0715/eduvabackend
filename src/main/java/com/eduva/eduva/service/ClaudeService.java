@@ -13,6 +13,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
@@ -25,6 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 @Service
 @Slf4j
@@ -52,11 +54,67 @@ public class ClaudeService {
     }
 
 
+//    public List<ClaudeQuestionInfo> autoGrade(List<String> fileUrls, SubmissionData submissionData, String rubricContent) throws IOException {
+//        List<ClaudeQuestionInfo> questions = objectMapper.readValue(
+//                rubricContent,
+//                objectMapper.getTypeFactory().constructCollectionType(List.class, ClaudeQuestionInfo.class)
+//        );
+//
+//        if (questions.isEmpty()) {
+//            return Collections.emptyList();
+//        }
+//
+//        // Process files once
+//        List<Map<String, Object>> fileContents = processFiles(fileUrls);
+//
+//        // Process first question synchronously
+//        ClaudeQuestionInfo firstQuestion = makeApiCallForGradeQuestion(fileContents, questions.get(0), submissionData);
+//
+//        // If there's only one question, return the result
+//        if (questions.size() == 1) {
+//            return List.of(firstQuestion);
+//        }
+//
+//        // Process remaining questions in parallel
+//        List<CompletableFuture<ClaudeQuestionInfo>> futures = questions.subList(1, questions.size()).stream()
+//                .map(question -> CompletableFuture.supplyAsync(() -> {
+//                    try {
+//                        return makeApiCallForGradeQuestion(fileContents, question, submissionData);
+//                    } catch (IOException e) {
+//                        throw new CompletionException(e);
+//                    }
+//                }))
+//                .toList();
+//
+//        // Combine first question with parallel results
+//        List<ClaudeQuestionInfo> results = new ArrayList<>();
+//        results.add(firstQuestion);
+//        results.addAll(futures.stream()
+//                .map(CompletableFuture::join)
+//                .toList());
+//
+//        return results;
+//    }
     public List<ClaudeQuestionInfo> autoGrade(List<String> fileUrls, SubmissionData submissionData, String rubricContent) throws IOException {
+
+        questionGradingRepository.deleteBySubmission_Id(submissionData.getId());
+
         List<ClaudeQuestionInfo> questions = objectMapper.readValue(
                 rubricContent,
                 objectMapper.getTypeFactory().constructCollectionType(List.class, ClaudeQuestionInfo.class)
         );
+
+        List<String> questionIds = questions.stream()
+                .map(ClaudeQuestionInfo::getQuestionId)  // Assuming there's a getId() method
+                .toList();
+
+        Map<String, Integer> questionIdToIndex = IntStream.range(0, questionIds.size())
+                .boxed()
+                .collect(Collectors.toMap(
+                        i -> questionIds.get(i),
+                        i -> i
+                ));
+
 
         if (questions.isEmpty()) {
             return Collections.emptyList();
@@ -65,34 +123,92 @@ public class ClaudeService {
         // Process files once
         List<Map<String, Object>> fileContents = processFiles(fileUrls);
 
+        // Create a map to hold results in the correct order
+        Map<String, ClaudeQuestionInfo> resultMap = new ConcurrentHashMap<>();
+
         // Process first question synchronously
-        ClaudeQuestionInfo firstQuestion = makeApiCallForGradeQuestion(fileContents, questions.get(0), submissionData);
+        ClaudeQuestionInfo firstQuestion = null;
+        try {
+            firstQuestion = makeApiCallForGradeQuestion(fileContents, questions.get(0), submissionData, questionIdToIndex.get(questions.get(0).getQuestionId()));
+            resultMap.put(questionIds.get(0), firstQuestion);  // Store the first question's result
+        } catch (HttpClientErrorException ex) {
+            if (ex.getStatusCode().value() == 429) {
+                // Handle rate-limiting for the first question
+                String retryAfter = ex.getResponseHeaders().getFirst("Retry-After");
+                long retryAfterMillis = retryAfter != null ? Long.parseLong(retryAfter) : 60;
+                log.warn("Rate limited on first question. Waiting for {} seconds", retryAfterMillis / 1000);
+                try {
+                    Thread.sleep(retryAfterMillis); // Wait before retrying
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while waiting for rate limit to expire", e);
+                }
+                firstQuestion = makeApiCallForGradeQuestion(fileContents, questions.get(0), submissionData, questionIdToIndex.get(questions.get(0).getQuestionId()));
+                resultMap.put(questionIds.get(0), firstQuestion);  // Store the first question's result after retry
+            } else {
+                throw new IOException("API error: " + ex.getMessage(), ex);
+            }
+        }
 
         // If there's only one question, return the result
         if (questions.size() == 1) {
             return List.of(firstQuestion);
         }
 
-        // Process remaining questions in parallel
-        List<CompletableFuture<ClaudeQuestionInfo>> futures = questions.subList(1, questions.size()).stream()
-                .map(question -> CompletableFuture.supplyAsync(() -> {
-                    try {
-                        return makeApiCallForGradeQuestion(fileContents, question, submissionData);
-                    } catch (IOException e) {
-                        throw new CompletionException(e);
+        // Create a list of remaining questions to process asynchronously
+        List<CompletableFuture<Void>> futures = questions.subList(1, questions.size()).stream()
+                .map((question) -> CompletableFuture.runAsync(() -> {
+                    int questionIndex = questions.indexOf(question);
+                    boolean rateLimited = false;
+                    long retryAfterMillis = 0;
+
+                    while (true) {
+                        try {
+                            // Make the API call and store the result in the correct position
+                            ClaudeQuestionInfo result = makeApiCallForGradeQuestion(fileContents, question, submissionData, questionIdToIndex.get(question.getQuestionId()));
+                            resultMap.put(question.getQuestionId(), result);  // Insert result in the right order
+                            return;
+                        } catch (HttpClientErrorException ex) {
+                            if (ex.getStatusCode().value() == 429) {
+                                if (!rateLimited) {
+                                    String retryAfter = ex.getResponseHeaders().getFirst("Retry-After");
+                                    retryAfterMillis = retryAfter != null ? Long.parseLong(retryAfter) : 60;
+                                    rateLimited = true;
+                                    log.warn("Rate limit hit for question ID. Retry after {} seconds.", retryAfterMillis / 1000);
+                                    try {
+                                        Thread.sleep(retryAfterMillis); // Wait before retrying
+                                    } catch (InterruptedException e) {
+                                        Thread.currentThread().interrupt();
+                                        try {
+                                            throw new IOException("Interrupted while waiting for rate limit to expire", e);
+                                        } catch (IOException exc) {
+                                            throw new RuntimeException(exc);
+                                        }
+                                    }
+                                }
+                            } else {
+                                throw new CompletionException(ex);
+                            }
+                        } catch (IOException e) {
+                            throw new CompletionException(e);
+                        }
                     }
                 }))
-                .toList();
+                .collect(Collectors.toList());
 
-        // Combine first question with parallel results
-        List<ClaudeQuestionInfo> results = new ArrayList<>();
-        results.add(firstQuestion);
-        results.addAll(futures.stream()
-                .map(CompletableFuture::join)
-                .toList());
+        // Wait for all futures to complete
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
-        return results;
+        // Create an ordered list based on the original questions' indices
+        List<ClaudeQuestionInfo> orderedResults = new ArrayList<>();
+        for (String questionId: questionIds) {
+            orderedResults.add(resultMap.get(questionId));
+        }
+
+        return orderedResults;
     }
+
+
 
     public QuestionIdsWithCacheFiles extractQuestionIds(List<String> fileUrls, String prompt, Long teacherId) throws IOException {
         List<Map<String, Object>> fileContents = processFiles(fileUrls);
@@ -171,8 +287,8 @@ public class ClaudeService {
         }
 
         List<String> groupedIds = new ArrayList<>();
-        for (int i = 0; i < questionIds.size(); i += 3) {
-            int end = Math.min(i + 3, questionIds.size());
+        for (int i = 0; i < questionIds.size(); i += 1) {
+            int end = Math.min(i + 1, questionIds.size());
             String group = String.join(",", questionIds.subList(i, end));
             groupedIds.add(group);
         }
@@ -480,24 +596,124 @@ public class ClaudeService {
 //        return null;
 //    }
 
+//    private List<ClaudeQuestionInfo> sendRequestForQuestionFormat(List<Map<String, Object>> fileContents, String questionIds, Long teacherId) throws IOException {
+//        String prompt = String.format(
+//                "I will give you some files about a specific problem set, and here are some given question ids: %s. For each of the given question id, please format the question information according to the following:\n" +
+//                        "\n" +
+//                        "(1) The question content\n" +
+//                        "\n" +
+//                        "(2) The pre-context that comes before the question but is related to this question. For example, question 2(a) and 2(b) may share some same context before them. Remember the pre-context includes all information needed to solve this problem. If there is no context, just put an empty string.\n" +
+//                        "\n" +
+//                        "(3) The rubric details for this question\n" +
+//                        "\n" +
+//                        "(4) The max grade/best level for this question, like '2 points', '3 points' or 'A', 'B+'\n" +
+//                        "\n" +
+//                        "Here are the question ids: %s \n" +
+//                        "Note:\n" +
+//                        "- Preserve all related details from the file.\n" +
+//                        "- Ensure information is clearly formatted and structured according to the question_format tool." +
+//                        "- Ensure that all of the given question ids's information have been included in the final json according to the question_format tool.\n.",
+//                questionIds, questionIds);
+//
+//        List<Map<String, Object>> content = new ArrayList<>(fileContents);
+//
+//        // Add text prompt
+//        Map<String, Object> textContent = new HashMap<>();
+//        textContent.put("type", "text");
+//        textContent.put("text", prompt);
+//        content.add(textContent);
+//
+//        // Create request body
+//        Map<String, Object> requestBody = new HashMap<>();
+//        requestBody.put("model", "claude-3-5-sonnet-20241022");
+//        requestBody.put("max_tokens", 4096);
+//
+//        List<Map<String, Object>> messages = new ArrayList<>();
+//        Map<String, Object> message = new HashMap<>();
+//        message.put("role", "user");
+//        message.put("content", content);
+//        messages.add(message);
+//
+//        requestBody.put("messages", messages);
+//
+//        // Create tools for question formatting
+//        List<Map<String, Object>> tools = createQuestionFormatExtractIdAndGenerateRubricTools();
+//        requestBody.put("tools", tools);
+//
+//        // Make API call
+//        HttpHeaders headers = new HttpHeaders();
+//        headers.setContentType(MediaType.APPLICATION_JSON);
+//        headers.set("x-api-key", apiKey);
+//        headers.set("anthropic-version", "2023-06-01");
+//
+//        HttpEntity<String> entity = new HttpEntity<>(
+//                objectMapper.writeValueAsString(requestBody),
+//                headers
+//        );
+//
+//        try {
+//            ResponseEntity<String> response = restTemplate.exchange(
+//                    apiUrl,
+//                    HttpMethod.POST,
+//                    entity,
+//                    String.class
+//            );
+//
+//            String responseBody = response.getBody();
+//            System.out.println(responseBody);
+//            ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
+//
+//            System.out.println("Response for question ID: " + questionIds +
+//                    "    " + objectMapper.writeValueAsString(claudeResponseBody));
+//
+//            saveUsageData(claudeResponseBody.getUsage(), teacherId);
+//
+//            // Process content items and extract question info
+//            for (ClaudeContentItem item : claudeResponseBody.getContent()) {
+//                if ("tool_use".equals(item.getType()) && item.getInput() != null && !item.getInput().getQuestions().isEmpty()) {
+//                    return item.getInput().getQuestions();
+//                }
+//            }
+//
+//            return null;
+//        } catch (HttpClientErrorException ex) {
+//            if (ex.getStatusCode().value() == 429) {
+//                String retryAfter = ex.getResponseHeaders().getFirst("Retry-After");
+//                log.warn("Rate limit reached for question ID {}. Retry after: {} seconds",
+//                        questionIds, retryAfter != null ? retryAfter : "unknown");
+//
+//                // Let the exception propagate so it can be handled by the rate limiting logic
+//                throw ex;
+//            } else {
+//                log.error("Error calling Anthropic API for question ID {}: {} - {}",
+//                        questionIds, ex.getStatusCode(), ex.getResponseBodyAsString());
+//                throw new IOException("API error: " + ex.getMessage(), ex);
+//            }
+//        } catch (Exception e) {
+//            log.error("Unexpected error processing question ID {}: {}", questionIds, e.getMessage(), e);
+//            throw new IOException("Error processing request: " + e.getMessage(), e);
+//        }
+//    }
+    // Modified API call method
+
     private List<ClaudeQuestionInfo> sendRequestForQuestionFormat(List<Map<String, Object>> fileContents, String questionIds, Long teacherId) throws IOException {
         String prompt = String.format(
-                "I will give you some files about a specific problem set, and here are some given question ids: %s. For each of the given question id, please format the question information according to the following:\n" +
+                "I will give you some files about a specific problem set. For the given question id %s, please format the question information according to the following:\n" +
                         "\n" +
                         "(1) The question content\n" +
                         "\n" +
-                        "(2) The pre-context that comes before the question but is related to this question. For example, question 2(a) and 2(b) may share the same context before them. If there is no context, just put an empty string.\n" +
+                        "(2) The pre-context that comes before the question but is related to this question. Remember the pre-context includes all information needed to solve this problem. If there is no context, just put an empty string.\n" +
                         "\n" +
                         "(3) The rubric details for this question\n" +
                         "\n" +
                         "(4) The max grade/best level for this question, like '2 points', '3 points' or 'A', 'B+'\n" +
                         "\n" +
-                        "Here are the question ids: %s \n" +
-                        "Note:\n" +
-                        "- Preserve all related details from the file.\n" +
-                        "- Ensure information is clearly formatted and structured according to the question_format tool." +
-                        "- Ensure that all of the given question ids's information have been included in the final json according to the question_format tool.\n.",
-                questionIds, questionIds);
+                        "Here is the question id: %s \n" +
+                        "Before providing the final response, verify these:\n" +
+                        "- Preserve all related grading details from the files into the rubric part, if there are any other information that will help grading, please continue to include them.\n" +
+                        "- If your given pre-context plus the question content is not enough for solving this problem %s, please continue to include more." +
+                        "- Ensure information is clearly formatted and structured according to the question_format tool.\n" ,
+                questionIds, questionIds, questionIds);
 
         List<Map<String, Object>> content = new ArrayList<>(fileContents);
 
@@ -578,7 +794,6 @@ public class ClaudeService {
             throw new IOException("Error processing request: " + e.getMessage(), e);
         }
     }
-    // Modified API call method
     private List<String> makeQuestionIdApiCall(Map<String, Object> requestBody, Long teacherId) throws IOException {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
@@ -620,26 +835,47 @@ public class ClaudeService {
     }
 
     private ClaudeQuestionInfo makeApiCallForGradeQuestion(List<Map<String, Object>> fileContents,
-                                                      ClaudeQuestionInfo question, SubmissionData submissionData) throws IOException {
+                                                      ClaudeQuestionInfo question, SubmissionData submissionData, Integer questionIndex) throws IOException {
 
         List<Map<String, Object>> content = new ArrayList<>(fileContents);
 
         // Add text prompt with question-specific information
         Map<String, Object> textContent = new HashMap<>();
         textContent.put("type", "text");
+//        String questionPrompt = String.format("""
+//            I want you to grade for the question %s from the student. Here are the steps you need to do:
+//            1. First try to come up with a solution for this question for yourself
+//            2. Find the corresponding rubric for question %s, read and understand the rubric for this question first and understand the grading and grading notes if any.
+//            3. Grade the student's response by your understanding and checking the rubric and then grade, please think critically and don't give the point too easy!! For your final grading, please provide with a grade and valid explanation for your grade based on the rubric.
+//
+//            Here is the rubric:
+//            %s
+//
+//            """,
+//                question.getQuestionId(),
+//                question.getQuestionId(),
+//                question.getRubric());
         String questionPrompt = String.format("""
             I want you to grade for the question %s from the student. Here are the steps you need to do:
-            1. First try to come up with a solution for this question for yourself
+            1. First read the question context and question content and try to come up with a solution for this question for yourself
             2. Find the corresponding rubric for question %s, read and understand the rubric for this question first and understand the grading and grading notes if any.
-            3. Grade the student's response by your understanding and checking the rubric and then grade, please think critically and don't give the point too easy!! For your final grading, please provide with a grade and valid explanation for your grade based on the rubric.
-           
-            Here is the rubric:
+            3. Grade the student's response by your understanding and checking the rubric and then grade, please think critically and don't give the point too easy!! For your final grading, please provide with a grade and very concise explanation for your grading based on the grading.
+            Here is the context you should know:
             %s
+            Here is the question content:
+            %s,
+            Here is the rubric:
+            %s, and the max grade/ best level you can give for this question is %s,
             
+            Please only output the final json and nothing else.
+            If student didn't do this question, give none to the grade and say "no response" in explanation.
             """,
                 question.getQuestionId(),
                 question.getQuestionId(),
-                question.getRubric());
+                question.getPreContext(),
+                question.getContent(),
+                question.getRubric(),
+                question.getMaxGrade());
         textContent.put("text", questionPrompt);
         content.add(textContent);
         // Create request body
@@ -667,7 +903,8 @@ public class ClaudeService {
         String responseBody = response.getBody();
 
         ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
-        System.out.println(claudeResponseBody);
+        System.out.println(question.getQuestionId());
+        System.out.println(objectMapper.writeValueAsString(claudeResponseBody));
 
         saveUsageData(claudeResponseBody.getUsage(), submissionData.getAssignment().getCourse().getTeacher().getId());
 
@@ -683,11 +920,8 @@ public class ClaudeService {
                 grading.setGrade(gradedQuestion.getGrade());
                 grading.setExplanation(gradedQuestion.getExplanation());
                 grading.setQuestionId(gradedQuestion.getQuestionId());
+                grading.setQuestion_order(questionIndex);
                 questionGradingRepository.save(grading);
-                // Save usage data
-                Long teacherId = submissionData.getAssignment().getCourse().getTeacher().getId();
-                saveUsageData(claudeResponseBody.getUsage(), teacherId);
-
                 return gradedQuestion;
             }
         }

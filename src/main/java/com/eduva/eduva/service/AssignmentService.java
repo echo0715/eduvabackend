@@ -271,14 +271,14 @@ public class AssignmentService {
         String rubricContent = assignmentData.getRubricContent();
 
         List<String> fileIds = new ArrayList<>();
-//
+
 //        for (FileData fileData : rubricList) {
 //            fileIds.add(fileData.getFileId());
 //        }
 
-        for (FileData fileData : problemSetFiles) {
-            fileIds.add(fileData.getFileId());
-        }
+//        for (FileData fileData : problemSetFiles) {
+//            fileIds.add(fileData.getFileId());
+//        }
 
         fileIds.add(studentfileurl);
         List<String> presignedUrls = new ArrayList<>();
