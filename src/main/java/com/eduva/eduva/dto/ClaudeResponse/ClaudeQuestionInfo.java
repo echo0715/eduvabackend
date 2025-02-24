@@ -11,6 +11,31 @@ public class ClaudeQuestionInfo {
     private String explanation;
     private String maxGrade;
     private String preContext;
+    private Boolean isPureText;
+
+    public ClaudeQuestionInfo(
+            String questionId,
+            String content,
+            String rubric,
+            String grade,
+            String explanation,
+            String maxGrade,
+            String preContext,
+            Boolean isPureText) {
+
+        this.questionId = questionId;
+        this.content = content;
+        this.rubric = rubric;
+        this.grade = grade;
+        this.explanation = explanation;
+        this.maxGrade = maxGrade;
+        this.preContext = preContext;
+        this.isPureText = isPureText;
+    }
+
+    // You might also want a no-args constructor for frameworks like Spring/Jackson
+    public ClaudeQuestionInfo() {
+    }
 
     // Getters and setters
     public String getQuestionId() {
@@ -67,5 +92,13 @@ public class ClaudeQuestionInfo {
 
     public void setPreContext(String preContext) {
         this.preContext = preContext;
+    }
+
+    public Boolean getIsPureText() {
+        return isPureText;
+    }
+
+    public void setIsPureText(Boolean pureText) {
+        isPureText = pureText;
     }
 }

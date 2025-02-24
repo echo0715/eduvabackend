@@ -259,7 +259,7 @@ public class AssignmentService {
         return submissionData;
     }
 
-    public List<ClaudeQuestionInfo> autoGrade(Long submissionId) throws IOException {
+    public List<ClaudeQuestionInfo> autoGrade(Long submissionId) throws IOException, InterruptedException {
         SubmissionData submissionData = submissionRepository.findById(submissionId).
                 orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Submssion data not found"));
 
