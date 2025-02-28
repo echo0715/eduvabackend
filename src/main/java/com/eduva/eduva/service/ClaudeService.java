@@ -40,6 +40,9 @@ public class ClaudeService {
 
     @Value("${anthropic.api.url}")
     private String apiUrl;
+    
+    @Value("${anthropic.model.name}")
+    private String anthropicModel;
 
     private RestTemplate restTemplate;
 
@@ -55,6 +58,7 @@ public class ClaudeService {
         this.objectMapper = objectMapper;
         this.questionGradingRepository = questionGradingRepository;
     }
+
 
 
 //    public List<ClaudeQuestionInfo> autoGrade(List<String> fileUrls, SubmissionData submissionData, String rubricContent) throws IOException {
@@ -193,8 +197,10 @@ public class ClaudeService {
         Map<String, ClaudeQuestionInfo> resultMap = new ConcurrentHashMap<>();
 
 
-        List<Map<String, Object>> fileContents = processFiles(fileUrls);
-        List<ClaudeQuestionInfo> claudeAnswerFormatInfoList = makeApiCallForFormatAnswer(fileContents, questionIds, submissionData);
+        List<Map<String, Object>> fileContentsWithCache = processFiles(fileUrls);
+        List<Map<String, Object>> fileContentsWithoutCache = processFilesWithoutCache(fileUrls);
+        List<ClaudeQuestionInfo> claudeAnswerFormatInfoList = makeApiCallForFormatAnswer(fileContentsWithCache, questionIds, submissionData);
+//        List<ClaudeQuestionInfo> claudeAnswerFormatInfoList = openRouterService.makeApiCallForFormatAnswer(fileContentsWithoutCache, questionIds, submissionData);
         String jsonString = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(claudeAnswerFormatInfoList);
         System.out.println(jsonString);
 
@@ -240,7 +246,7 @@ public class ClaudeService {
         for (String questionId : questionWithoutPureTextIds) {
             tasks.add(() -> {
                 ClaudeQuestionInfo question = questionMap.get(questionId);
-                ClaudeQuestionInfo result = makeApiCallForGradeQuestion(fileContents, question, submissionData, questionIdToIndex.get(questionId));
+                ClaudeQuestionInfo result = makeApiCallForGradeQuestion(fileContentsWithCache, question, submissionData, questionIdToIndex.get(questionId));
                 resultMap.put(questionId, result);
                 return result;
             });
@@ -249,7 +255,7 @@ public class ClaudeService {
         // Execute all tasks concurrently
         List<Future<ClaudeQuestionInfo>> futures = executorService.invokeAll(tasks);
         executorService.shutdown();
-        executorService.awaitTermination(60, TimeUnit.SECONDS);
+        executorService.awaitTermination(180, TimeUnit.SECONDS);
 
         List<ClaudeQuestionInfo> orderedResults = new ArrayList<>();
         for (String questionId : questionIds) {
@@ -289,7 +295,7 @@ public class ClaudeService {
 
         // Create request body
         Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", "claude-3-5-sonnet-20241022");
+        requestBody.put("model", anthropicModel);
         requestBody.put("max_tokens", 1024);
 
         List<Map<String, Object>> messages = new ArrayList<>();
@@ -612,7 +618,7 @@ public class ClaudeService {
 //
 //        // Create request body
 //        Map<String, Object> requestBody = new HashMap<>();
-//        requestBody.put("model", "claude-3-5-sonnet-20241022");
+//        requestBody.put("model", anthropicModel);
 //        requestBody.put("max_tokens", 4096);
 //
 //        List<Map<String, Object>> messages = new ArrayList<>();
@@ -692,7 +698,7 @@ public class ClaudeService {
 //
 //        // Create request body
 //        Map<String, Object> requestBody = new HashMap<>();
-//        requestBody.put("model", "claude-3-5-sonnet-20241022");
+//        requestBody.put("model", anthropicModel);
 //        requestBody.put("max_tokens", 4096);
 //
 //        List<Map<String, Object>> messages = new ArrayList<>();
@@ -775,7 +781,7 @@ public class ClaudeService {
                         "\n" +
                         "(4) The max grade/best level for this question, like '2 points', '3 points' or 'A', 'B+'\n" +
                         "\n" +
-                        "(5) Whether the problem context, problem content, and anticipated student response for this question should contain pure text, or should contain figures, images, tables. \n" +
+                        "(5) Whether the problem context, problem content, and anticipated student response for this question should contain pure text, or should contain figures, images, tables. If it is pure text, return true. If the problem context or problem content is not pure text, but the information of them is already fully extracted, also return true. Otherwise return false.  \n" +
                         "\n" +
                         "Here is the question id: %s \n" +
                         "Before providing the final response, verify these:\n" +
@@ -794,7 +800,7 @@ public class ClaudeService {
 
         // Create request body
         Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", "claude-3-5-sonnet-20241022");
+        requestBody.put("model", anthropicModel);
         requestBody.put("max_tokens", 4096);
 
         List<Map<String, Object>> messages = new ArrayList<>();
@@ -912,10 +918,10 @@ public class ClaudeService {
         Map<String, Object> textContent = new HashMap<>();
         textContent.put("type", "text");
         String questionPrompt = String.format("""
-            I want you to grade for the question %s from the student. Here are the steps you need to do:
+            I want you to grade for the question %s from the student answer and output the json using the answer_grading_tool. Here are the steps you need to do:
             1. First read the question context and question content and try to come up with a solution for this question for yourself
             2. Find the corresponding rubric for question %s, read and understand the rubric for this question first and understand the grading and grading notes if any.
-            3. Grade the student's response by your understanding and checking the rubric and then grade, please think critically and don't give the point too easy!! For your final grading, please provide with a grade and very concise explanation consists for your grading.
+            3. Grade the student's answer by your understanding and checking the rubric and then grade, please think critically and don't give the point too easy!! For your final grading, please provide with a grade and very concise explanation consists for your grading.
             Here is the context you should know:
             %s
             Here is the question content:
@@ -923,7 +929,7 @@ public class ClaudeService {
             Here is the rubric:
             %s, and the max grade/ best level you can give for this question is %s,
             
-            The student response is in the attached file. If student didn't do this question, give none to the grade and say "no response" in explanation.
+            The student's answer is in the attached file. If student didn't do this question, give none to the grade and say "No related answer" in explanation.
             """,
                 question.getQuestionId(),
                 question.getQuestionId(),
@@ -933,9 +939,9 @@ public class ClaudeService {
                 question.getMaxGrade());
         textContent.put("text", questionPrompt);
 
-        Map<String, Object> cacheControl = new HashMap<>();
-        cacheControl.put("type", "ephemeral");
-        textContent.put("cache_control", cacheControl);
+//        Map<String, Object> cacheControl = new HashMap<>();
+//        cacheControl.put("type", "ephemeral");
+//        textContent.put("cache_control", cacheControl);
         content.add(textContent);
         // Create request body
         Map<String, Object> requestBody = createGradeRequestBody(content);
@@ -1122,7 +1128,7 @@ public class ClaudeService {
     private List<Map<String, Object>> createGradeTools() {
         List<Map<String, Object>> tools = new ArrayList<>();
         Map<String, Object> tool = new HashMap<>();
-        tool.put("name", "grading_tool");
+        tool.put("name", "answer_grading_tool");
         tool.put("description", "Grading the student response according to the rubric and your understanding, return the question_id, grade, and justification for your grading.");
 
         Map<String, Object> inputSchema = new HashMap<>();
@@ -1290,11 +1296,18 @@ public class ClaudeService {
         tools.add(createRubricGeneratingTools().get(0));
         return tools;
     }
+
+    private List<Map<String, Object>> createFormatAnswerAndGradeTools(){
+        List<Map<String, Object>> tools = new ArrayList<>();
+        tools.add(createGradeTools().get(0));
+        tools.add(createFormatAnswerTools().get(0));
+        return tools;
+    }
     private List<Map<String, Object>> createFormatAnswerTools(){
         List<Map<String, Object>> tools = new ArrayList<>();
         Map<String, Object> tool = new HashMap<>();
         tool.put("name", "response_parsing_tool");
-        tool.put("description", "Parse the student responses and return a mapping of question IDs to their corresponding responses content");
+        tool.put("description", "Parse the student responses and return a mapping of question IDs to their corresponding responses content but not grade");
 
         Map<String, Object> inputSchema = new HashMap<>();
         inputSchema.put("type", "object");
@@ -1342,7 +1355,7 @@ public class ClaudeService {
 
     private Map<String, Object> createGradeRequestBody(List<Map<String, Object>> content) {
         Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", "claude-3-5-sonnet-20241022");
+        requestBody.put("model", anthropicModel);
         requestBody.put("max_tokens", 1024);
 
         List<Map<String, Object>> messages = new ArrayList<>();
@@ -1352,14 +1365,14 @@ public class ClaudeService {
         messages.add(message);
         requestBody.put("messages", messages);
 
-        requestBody.put("tools", createGradeTools());
+        requestBody.put("tools", createFormatAnswerAndGradeTools());
 
         return requestBody;
     }
 
     private Map<String, Object> createFormatAnswerRequestBody(List<Map<String, Object>> content) {
         Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", "claude-3-5-sonnet-20241022");
+        requestBody.put("model", anthropicModel);
         requestBody.put("max_tokens", 4096);
 
         List<Map<String, Object>> messages = new ArrayList<>();
@@ -1368,8 +1381,7 @@ public class ClaudeService {
         message.put("content", content);
         messages.add(message);
         requestBody.put("messages", messages);
-        requestBody.put("tools", createFormatAnswerTools());
-
+        requestBody.put("tools", createFormatAnswerAndGradeTools());
         return requestBody;
     }
 
@@ -1378,7 +1390,7 @@ public class ClaudeService {
 
     private Map<String, Object> createRubricGeneratingRequestBody(List<Map<String, Object>> content) {
         Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", "claude-3-5-sonnet-20241022");
+        requestBody.put("model", anthropicModel);
         requestBody.put("max_tokens", 1024);
 
         List<Map<String, Object>> messages = new ArrayList<>();
@@ -1408,6 +1420,26 @@ public class ClaudeService {
             Map<String, Object> cacheControl = new HashMap<>();
             cacheControl.put("type", "ephemeral");
             fileContent.put("cache_control", cacheControl);
+
+            fileContent.put("source", source);
+            fileContents.add(fileContent);
+        }
+        return fileContents;
+    }
+
+    private List<Map<String, Object>> processFilesWithoutCache(List<String> fileUrls) throws IOException {
+        List<Map<String, Object>> fileContents = new ArrayList<>();
+        for (String fileUrl : fileUrls) {
+            byte[] fileBytes = downloadFile(fileUrl);
+            String base64File = Base64.getEncoder().encodeToString(fileBytes);
+
+            Map<String, Object> fileContent = new HashMap<>();
+            fileContent.put("type", "document");
+
+            Map<String, Object> source = new HashMap<>();
+            source.put("type", "base64");
+            source.put("media_type", determineMediaType(fileUrl));
+            source.put("data", base64File);
 
             fileContent.put("source", source);
             fileContents.add(fileContent);

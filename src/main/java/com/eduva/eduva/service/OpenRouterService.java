@@ -158,6 +158,7 @@ package com.eduva.eduva.service;
 import com.eduva.eduva.dto.ClaudeResponse.ClaudeQuestionInfo;
 import com.eduva.eduva.model.QuestionGrading;
 import com.eduva.eduva.repository.QuestionGradingRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.eduva.eduva.model.SubmissionData;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -165,9 +166,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
-
+import java.io.IOException;
 import java.util.*;
 
 @Service
@@ -179,6 +181,9 @@ public class OpenRouterService {
 
     @Value("${openrouter.api.url}")
     private String apiUrl;
+
+    @Value("${openrouter.gemini.api.url}")
+    private String geminiApiUrl;
 
 
     @Autowired
@@ -423,6 +428,162 @@ public class OpenRouterService {
             return false;
         }
     }
+
+    public List<ClaudeQuestionInfo> makeApiCallForFormatAnswer(List<Map<String, Object>> fileContents,
+                                                               List<String> questionIds, SubmissionData submissionData) throws JsonProcessingException {
+        String joinedQuestionIds = String.join(",", questionIds);
+
+        // Create request body for OpenRouter/Gemini
+        Map<String, Object> requestBody = createGeminiFormatAnswerRequestBody(fileContents, joinedQuestionIds);
+
+        // Make API call to OpenRouter
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("Authorization", "Bearer " + apiKey);
+
+        HttpEntity<String> entity = new HttpEntity<>(
+                objectMapper.writeValueAsString(requestBody),
+                headers
+        );
+
+        System.out.println("ready to send gemini format");
+        ResponseEntity<String> response = restTemplate.exchange(
+                apiUrl + "/chat/completions",
+                HttpMethod.POST,
+                entity,
+                String.class
+        );
+        System.out.println("get gemini format");
+
+        // Process response from OpenRouter/Gemini
+        String responseBody = response.getBody();
+        System.out.println(responseBody);
+
+//        OpenRouterResponseBody geminiResponseBody = objectMapper.readValue(responseBody, OpenRouterResponseBody.class);
+//
+//        // Save usage data if needed
+//        if (geminiResponseBody.getUsage() != null) {
+//            saveUsageData(geminiResponseBody.getUsage(), submissionData.getAssignment().getCourse().getTeacher().getId());
+//        }
+
+        // Extract and parse the JSON response containing question info
+        return null;
+    }
+
+    private Map<String, Object> createGeminiFormatAnswerRequestBody(List<Map<String, Object>> fileContents, String joinedQuestionIds) {
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("model", "google/gemini-2.0-flash-001");
+        requestBody.put("max_tokens", 4096);
+
+        List<Map<String, Object>> messages = new ArrayList<>();
+
+        // System message to define the task
+        Map<String, Object> systemMessage = new HashMap<>();
+        systemMessage.put("role", "system");
+        systemMessage.put("content", "You are a helpful assistant that parses student responses into a structured format.");
+        messages.add(systemMessage);
+
+        // User message with file contents and instructions
+        Map<String, Object> userMessage = new HashMap<>();
+        userMessage.put("role", "user");
+
+        // Create text content with instructions
+        String prompt = String.format("""
+        I will give you a file of student response and a list of question ids.
+        You should return a json that contain each question id and the student response correspond to that specific question.
+        You should decide whether the student response is pure text, or it contain images, figures or tables. If it is pure text, give true, otherwise give false.
+        
+        Note:
+        Check the json output should contain all the question ids: %s
+        Make sure that you include everything that the student written for each question id.
+        Here is the list of question ids: %s
+        """, joinedQuestionIds, joinedQuestionIds);
+
+        // Create combined content with files and instructions
+        List<Object> content = new ArrayList<>(fileContents);
+        Map<String, Object> textContent = new HashMap<>();
+        textContent.put("type", "text");
+        textContent.put("text", prompt);
+        content.add(textContent);
+
+        userMessage.put("content", content);
+        messages.add(userMessage);
+
+        requestBody.put("messages", messages);
+
+        // Add function calling capability
+        requestBody.put("tools", createGeminiFormatAnswerTools());
+        requestBody.put("tool_choice", createToolChoice());
+
+        return requestBody;
+    }
+
+    private List<Map<String, Object>> createGeminiFormatAnswerTools() {
+        List<Map<String, Object>> tools = new ArrayList<>();
+
+        Map<String, Object> functionTool = new HashMap<>();
+        functionTool.put("type", "function");
+
+        Map<String, Object> function = new HashMap<>();
+        function.put("name", "response_parsing_tool");
+        function.put("description", "Parse the student responses and return a mapping of question IDs to their corresponding responses content");
+
+        Map<String, Object> parameters = new HashMap<>();
+        parameters.put("type", "object");
+
+        Map<String, Object> properties = new HashMap<>();
+
+        Map<String, Object> questions = new HashMap<>();
+        questions.put("type", "array");
+        questions.put("description", "Array of question objects with ID, content, and type information");
+
+        Map<String, Object> items = new HashMap<>();
+        items.put("type", "object");
+
+        Map<String, Object> itemProperties = new HashMap<>();
+
+        Map<String, Object> questionId = new HashMap<>();
+        questionId.put("type", "string");
+        questionId.put("description", "A unique question id, e.g. '1', '2(a)', '3(1)' etc.");
+        itemProperties.put("question_id", questionId);
+
+        Map<String, Object> content = new HashMap<>();
+        content.put("type", "string");
+        content.put("description", "The student's written response for this question.");
+        itemProperties.put("content", content);
+
+        Map<String, Object> isPureText = new HashMap<>();
+        isPureText.put("type", "boolean");
+        isPureText.put("description", "Whether the student response is pure text (true) or it contains drawings, figures, or tables (false).");
+        itemProperties.put("isPureText", isPureText);
+
+        items.put("properties", itemProperties);
+        items.put("required", Arrays.asList("question_id", "content", "isPureText"));
+
+        questions.put("items", items);
+        properties.put("questions", questions);
+
+        parameters.put("properties", properties);
+        parameters.put("required", Collections.singletonList("questions"));
+
+        function.put("parameters", parameters);
+        functionTool.put("function", function);
+
+        tools.add(functionTool);
+        return tools;
+    }
+
+    private Map<String, Object> createToolChoice() {
+        Map<String, Object> toolChoice = new HashMap<>();
+        toolChoice.put("type", "function");
+
+        Map<String, Object> function = new HashMap<>();
+        function.put("name", "response_parsing_tool");
+
+        toolChoice.put("function", function);
+        return toolChoice;
+    }
+
 
 
 }
