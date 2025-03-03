@@ -505,6 +505,157 @@ public class ClaudeService {
         return orderedResults;
     }
 
+    public List<ClaudeQuestionInfo> formatOnlyContentQuestions(List<Map<String, Object>> fileContents, List<String> questionIds, Long teacherId) throws IOException {
+        if (questionIds.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<String> groupedIds = new ArrayList<>();
+        for (int i = 0; i < questionIds.size(); i += 1) {
+            int end = Math.min(i + 1, questionIds.size());
+            String group = String.join(",", questionIds.subList(i, end));
+            groupedIds.add(group);
+        }
+
+        // Create a map to hold results in the correct order
+        Map<String, List<ClaudeQuestionInfo>> resultMap = new ConcurrentHashMap<>();
+
+        // Process first question synchronously
+        List<ClaudeQuestionInfo> firstBatch;
+        try {
+            firstBatch = sendRequestForQuestionContentOnlyFormat(fileContents, groupedIds.get(0), teacherId);
+            resultMap.put(groupedIds.get(0), firstBatch);
+        } catch (HttpClientErrorException ex) {
+            if (ex.getStatusCode().value() == 429) {
+
+                String retryAfter = ex.getResponseHeaders().getFirst("Retry-After");
+                long secondsToWait = retryAfter != null ? Long.parseLong(retryAfter) : 60;
+                log.warn("Rate limited on first question. Waiting for {} seconds", secondsToWait);
+                try {
+                    Thread.sleep(secondsToWait * 1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while waiting for rate limit to expire", ie);
+                }
+                // Try again after waiting
+                firstBatch = sendRequestForQuestionFormat(fileContents, groupedIds.get(0), teacherId);
+                resultMap.put(groupedIds.get(0), firstBatch);
+            } else {
+                throw new IOException("API error: " + ex.getMessage(), ex);
+            }
+        }
+
+        // If there's only one question, return the result
+        if (groupedIds.size() == 1) {
+            return firstBatch;
+        }
+
+        // Keep track of which questions we've processed
+//        Set<String> processedQuestionIds = new HashSet<>();
+
+        Set<String> processedQuestionIds = Collections.synchronizedSet(new HashSet<>());
+        processedQuestionIds.add(groupedIds.get(0));
+
+        // Create a list of remaining question IDs to process
+        List<String> remainingQuestionIds = new ArrayList<>(groupedIds.subList(1, groupedIds.size()));
+
+        // Process remaining questions in batches until all are done
+        while (!remainingQuestionIds.isEmpty()) {
+            // Use a thread pool with a reasonable size
+            ExecutorService executor = Executors.newFixedThreadPool(
+                    Math.min(10, remainingQuestionIds.size())
+            );
+
+            // Track if we hit rate limits in this batch
+            AtomicBoolean rateLimited = new AtomicBoolean(false);
+            AtomicLong retryAfterMillis = new AtomicLong(0);
+
+            // Process current batch
+            List<CompletableFuture<Void>> futures = new ArrayList<>();
+            for (String qIds : remainingQuestionIds) {
+                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                    if (rateLimited.get()) {
+                        return; // Skip if we already hit rate limit
+                    }
+
+                    try {
+                        List<ClaudeQuestionInfo> result = sendRequestForQuestionContentOnlyFormat(fileContents, qIds, teacherId);
+                        if (result != null) {
+                            resultMap.put(qIds, result);
+                            processedQuestionIds.add(qIds);
+                        }
+                    } catch (HttpClientErrorException ex) {
+                        if (ex.getStatusCode().value() == 429) {
+                            String retryAfter = ex.getResponseHeaders().getFirst("Retry-After");
+                            long secondsToWait = retryAfter != null ? Long.parseLong(retryAfter) : 60;
+                            rateLimited.set(true);
+                            retryAfterMillis.set(secondsToWait * 1000);
+                            log.warn("Rate limit hit for question ID: {}. Retry after: {} seconds",
+                                    qIds, secondsToWait);
+                        } else {
+                            log.error("API error for question ID {}: {} - {}",
+                                    qIds, ex.getStatusCode(), ex.getResponseBodyAsString());
+                        }
+                    } catch (IOException e) {
+                        log.error("Error processing question ID {}: {}", qIds, e.getMessage());
+                    }
+                }, executor);
+
+                futures.add(future);
+            }
+
+            // Wait for all futures to complete or a rate limit to be hit
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                    .exceptionally(e -> null)
+                    .join();
+
+            // Create new list of remaining questions
+//            remainingQuestionIds = remainingQuestionIds.stream()
+//                    .filter(ids -> !processedQuestionIds.contains(ids))
+//                    .collect(Collectors.toList());
+
+            synchronized (processedQuestionIds) {
+                remainingQuestionIds = remainingQuestionIds.stream()
+                        .filter(ids -> !processedQuestionIds.contains(ids))
+                        .collect(Collectors.toList());
+            }
+
+            // If we hit a rate limit and didn't make progress, wait
+            if (rateLimited.get() && !remainingQuestionIds.isEmpty()) {
+                long waitTime = retryAfterMillis.get();
+                log.info("Waiting for rate limit to expire: {} ms before resuming batch processing", waitTime);
+                try {
+                    Thread.sleep(waitTime);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while waiting for rate limit to expire", ie);
+                }
+            }
+
+            // Shutdown executor
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException ie) {
+                executor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        // Convert map to ordered list based on original questionIds order
+        List<ClaudeQuestionInfo> orderedResults = new ArrayList<>();
+        for (String qIds : groupedIds) {
+            List<ClaudeQuestionInfo> info = resultMap.get(qIds);
+            if (info != null) {
+                orderedResults.addAll(info);
+            }
+        }
+
+        return orderedResults;
+    }
+
     public List<ClaudeQuestionInfo> formatQuestionsByAutoGenerateRubrics(List<Map<String, Object>> fileContents, List<String> questionIds) throws IOException {
         if (questionIds.isEmpty()) {
             return Collections.emptyList();
@@ -813,6 +964,104 @@ public class ClaudeService {
 
         // Create tools for question formatting
         List<Map<String, Object>> tools = createQuestionFormatExtractIdAndGenerateRubricTools();
+        requestBody.put("tools", tools);
+
+        // Make API call
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("x-api-key", apiKey);
+        headers.set("anthropic-version", "2023-06-01");
+
+        HttpEntity<String> entity = new HttpEntity<>(
+                objectMapper.writeValueAsString(requestBody),
+                headers
+        );
+
+        try {
+            ResponseEntity<String> response = restTemplate.exchange(
+                    apiUrl,
+                    HttpMethod.POST,
+                    entity,
+                    String.class
+            );
+
+            String responseBody = response.getBody();
+            System.out.println(responseBody);
+            ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
+
+            System.out.println("Response for question ID: " + questionIds +
+                    "    " + objectMapper.writeValueAsString(claudeResponseBody));
+
+            saveUsageData(claudeResponseBody.getUsage(), teacherId);
+
+            // Process content items and extract question info
+            for (ClaudeContentItem item : claudeResponseBody.getContent()) {
+                if ("tool_use".equals(item.getType()) && item.getInput() != null && !item.getInput().getQuestions().isEmpty()) {
+                    return item.getInput().getQuestions();
+                }
+            }
+
+            return null;
+        } catch (HttpClientErrorException ex) {
+            if (ex.getStatusCode().value() == 429) {
+                String retryAfter = ex.getResponseHeaders().getFirst("Retry-After");
+                log.warn("Rate limit reached for question ID {}. Retry after: {} seconds",
+                        questionIds, retryAfter != null ? retryAfter : "unknown");
+
+                // Let the exception propagate so it can be handled by the rate limiting logic
+                throw ex;
+            } else {
+                log.error("Error calling Anthropic API for question ID {}: {} - {}",
+                        questionIds, ex.getStatusCode(), ex.getResponseBodyAsString());
+                throw new IOException("API error: " + ex.getMessage(), ex);
+            }
+        } catch (Exception e) {
+            log.error("Unexpected error processing question ID {}: {}", questionIds, e.getMessage(), e);
+            throw new IOException("Error processing request: " + e.getMessage(), e);
+        }
+    }
+
+    private List<ClaudeQuestionInfo> sendRequestForQuestionContentOnlyFormat(List<Map<String, Object>> fileContents, String questionIds, Long teacherId) throws IOException {
+        String prompt = String.format(
+                "I will give you some files about a specific problem set. For the given question id %s, please format the question information according to the following:\n" +
+                        "\n" +
+                        "(1) The question content\n" +
+                        "\n" +
+                        "(2) The pre-context that comes before the question but is related to this question. Remember the pre-context includes all information needed to solve this problem. If there is no context, just put an empty string.\n" +
+                        "\n" +
+                        "(3) The max grade/best level for this question, like '2 points', '3 points' or 'A', 'B+'\n, if there is no such information, just give null" +
+                        "\n" +
+                        "(4) Whether the problem context, problem content, and anticipated student response for this question should contain pure text, or should contain figures, images, tables. If it is pure text, return true. If the problem context or problem content is not pure text, but the information of them is already fully extracted, also return true. Otherwise return false.  \n" +
+                        "\n" +
+                        "Here is the question id: %s \n" +
+                        "Before providing the final response, verify these:\n" +
+                        "- If your given pre-context plus the question content is not enough for solving this problem %s, please continue to include more.\n" +
+                        "- Ensure information is clearly formatted and structured according to the question_content_format tool.\n" ,
+                questionIds, questionIds, questionIds);
+
+        List<Map<String, Object>> content = new ArrayList<>(fileContents);
+
+        // Add text prompt
+        Map<String, Object> textContent = new HashMap<>();
+        textContent.put("type", "text");
+        textContent.put("text", prompt);
+        content.add(textContent);
+
+        // Create request body
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("model", anthropicModel);
+        requestBody.put("max_tokens", 4096);
+
+        List<Map<String, Object>> messages = new ArrayList<>();
+        Map<String, Object> message = new HashMap<>();
+        message.put("role", "user");
+        message.put("content", content);
+        messages.add(message);
+
+        requestBody.put("messages", messages);
+
+        // Create tools for question formatting
+        List<Map<String, Object>> tools = createQuestionOnlyContentFormatTools();
         requestBody.put("tools", tools);
 
         // Make API call
@@ -1248,6 +1497,78 @@ public class ClaudeService {
         tools.add(tool);
         return tools;
     }
+
+    private List<Map<String, Object>> createQuestionOnlyContentFormatTools(){
+        List<Map<String, Object>> tools = new ArrayList<>();
+        Map<String, Object> tool = new HashMap<>();
+        tool.put("name", "question_content_format");
+        tool.put("description", "Format the question details including the question id, content, pre-context, and max grade");
+
+        // Define input schema for the tool
+        Map<String, Object> inputSchema = new HashMap<>();
+        inputSchema.put("type", "object");
+
+        // Define the questions array
+        Map<String, Object> questionsProps = new HashMap<>();
+        questionsProps.put("type", "array");
+
+        // Define question item structure
+        Map<String, Object> questionItem = new HashMap<>();
+        questionItem.put("type", "object");
+
+        // Define question properties
+        Map<String, Object> questionItemProperties = new HashMap<>();
+
+        // question_id
+        Map<String, Object> questionIdDef = new HashMap<>();
+        questionIdDef.put("type", "string");
+        questionIdDef.put("description", "A unique question id, e.g. '1', '2(a)', '3(1)' etc.");
+        questionItemProperties.put("question_id", questionIdDef);
+
+        // content
+        Map<String, Object> contentDef = new HashMap<>();
+        contentDef.put("type", "string");
+        contentDef.put("description", "The content or the text of the question.");
+        questionItemProperties.put("content", contentDef);
+
+        // maxGrade
+        Map<String, Object> maxGradeDef = new HashMap<>();
+        maxGradeDef.put("type", "string");
+        maxGradeDef.put("description", "The best grade or the full points that this question can give, e.g. 'A', 'B+', '3 points', '1 points', etc.");
+        questionItemProperties.put("maxGrade", maxGradeDef);
+
+        // preContext
+        Map<String, Object> preContextDef = new HashMap<>();
+        preContextDef.put("type", "string");
+        preContextDef.put("description", "The context for the question.");
+        questionItemProperties.put("preContext", preContextDef);
+
+        Map<String, Object> isPureText = new HashMap<>();
+        isPureText.put("type", "boolean");
+        isPureText.put("description", "Whether the problem context, problem content and anticipated student response is pure text or not.");
+        questionItemProperties.put("isPureText", isPureText);
+
+
+        // Define required fields
+        questionItem.put("properties", questionItemProperties);
+        questionItem.put("required", List.of("question_id", "content", "maxGrade", "preContext", "isPureText"));
+
+        // Add question item to questions array
+        questionsProps.put("items", questionItem);
+
+        // Add questions to top-level properties
+        Map<String, Object> topLevelProperties = new HashMap<>();
+        topLevelProperties.put("questions", questionsProps);
+
+        // Finalize input schema
+        inputSchema.put("properties", topLevelProperties);
+        inputSchema.put("required", List.of("questions"));
+        tool.put("input_schema", inputSchema);
+
+        tools.add(tool);
+        return tools;
+    }
+
     private List<Map<String,Object>> createExtractIdTools(){
         List<Map<String, Object>> tools = new ArrayList<>();
 
@@ -1303,6 +1624,7 @@ public class ClaudeService {
         tools.add(createFormatAnswerTools().get(0));
         return tools;
     }
+
     private List<Map<String, Object>> createFormatAnswerTools(){
         List<Map<String, Object>> tools = new ArrayList<>();
         Map<String, Object> tool = new HashMap<>();

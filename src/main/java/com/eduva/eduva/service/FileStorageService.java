@@ -135,6 +135,59 @@ public class FileStorageService {
         }
     }
 
+    public String generateImagePresignedUrl(String fileName) {
+        try {
+            Date expirationTime = new Date(System.currentTimeMillis() + 3600 * 1000);
+            GeneratePresignedUrlRequest request =
+                    new GeneratePresignedUrlRequest(bucketName, fileName, HttpMethodName.GET);
+            request.setExpiration(expirationTime);
+
+            // Determine the content type based on file extension
+            String contentType = determineContentType(fileName);
+
+            ResponseHeaderOverrides overrides = new ResponseHeaderOverrides();
+            overrides.setContentType(contentType);
+            overrides.setContentDisposition("inline");
+            request.setResponseHeaders(overrides);
+
+            URL url = cosClient.generatePresignedUrl(request);
+            return url.toString();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to generate file URL", e);
+        }
+    }
+
+    // Helper method to determine content type based on file extension
+    private String determineContentType(String fileName) {
+        String extension = "";
+        int i = fileName.lastIndexOf('.');
+        if (i > 0) {
+            extension = fileName.substring(i + 1).toLowerCase();
+        }
+
+        switch (extension) {
+            case "jpg":
+            case "jpeg":
+                return "image/jpeg";
+            case "png":
+                return "image/png";
+            case "gif":
+                return "image/gif";
+            case "svg":
+                return "image/svg+xml";
+            case "webp":
+                return "image/webp";
+            case "bmp":
+                return "image/bmp";
+            case "tiff":
+            case "tif":
+                return "image/tiff";
+            default:
+                // Default to a generic image type or octet-stream if extension is unknown
+                return "image/*";
+        }
+    }
+
 
     private String getFileExtension(String fileName) {
         if (fileName == null || fileName.lastIndexOf(".") == -1) {

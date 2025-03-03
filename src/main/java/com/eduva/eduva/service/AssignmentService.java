@@ -145,9 +145,11 @@ public class AssignmentService {
             assignment.setRubricFinished(true);
             assignment.setRubricType("create");
         } else if (assignmentCreateRequest.getRubricOption().equals("handwriting")) {
-            List<ClaudeQuestionInfo> formattedQuestions = questionIds.stream()
-                    .map(ClaudeQuestionInfo::new)
-                    .toList();
+//            List<ClaudeQuestionInfo> formattedQuestions = questionIds.stream()
+//                    .map(ClaudeQuestionInfo::new)
+//                    .toList();
+
+            List<ClaudeQuestionInfo> formattedQuestions = claudeService.formatOnlyContentQuestions(fileContents, questionIds, assignmentCreateRequest.getTeacherId());
             formattedQuestions.forEach(question -> question.setRubricType("image"));
             ObjectMapper objectMapper = new ObjectMapper();
             String jsonRubricContent = objectMapper.writeValueAsString(formattedQuestions);
