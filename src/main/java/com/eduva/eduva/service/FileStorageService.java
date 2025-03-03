@@ -57,7 +57,6 @@ public class FileStorageService {
         clientConfig.setEndpointBuilder(endPointBuilder);
 
         this.cosClient = new COSClient(credentials, clientConfig);
-
     }
 
     private void configureBucketDomain() {

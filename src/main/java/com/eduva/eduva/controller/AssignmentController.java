@@ -2,11 +2,14 @@ package com.eduva.eduva.controller;
 
 import com.eduva.eduva.dto.*;
 import com.eduva.eduva.dto.ClaudeResponse.ClaudeQuestionInfo;
+import com.eduva.eduva.dto.QuestionImageRequest.QuestionImageUpload;
+import com.eduva.eduva.dto.QuestionImageRequest.QuestionImageUploadNotificationRequest;
 import com.eduva.eduva.model.AssignmentData;
+import com.eduva.eduva.model.QuestionImage;
 import com.eduva.eduva.model.SubmissionData;
 import com.eduva.eduva.service.AssignmentService;
-import com.eduva.eduva.service.AzureDocIntelligenceService;
 import com.eduva.eduva.service.FileStorageService;
+import com.eduva.eduva.service.QuestionImageService;
 import org.apache.coyote.BadRequestException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
@@ -16,7 +19,10 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/assignments")
@@ -33,6 +39,9 @@ public class AssignmentController {
 
     @Autowired
     private FileStorageService fileStorageService;
+
+    @Autowired
+    private QuestionImageService questionImageService;
 
     @PostMapping(value = "/teacher/create", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<AssignmentData> createAssignment(@ModelAttribute AssignmentCreateRequest assignmentCreateRequest) {
@@ -51,6 +60,7 @@ public class AssignmentController {
     public List<AssignmentData> getAssignmentsByCourseId(@PathVariable Long courseId) {
         return assignmentService.findByCourseId(courseId);
     }
+
 
     @PostMapping("/updaterubric/{assignmentId}")
     public ResponseEntity<?> updateRubricContent(@PathVariable Long assignmentId, @RequestBody String rubricContent) {
@@ -127,5 +137,57 @@ public class AssignmentController {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Error grading students' response ");
         }
     }
+
+    @PostMapping("predesign-url")
+    public ResponseEntity<Map<String, String>> getPredesignUrl(@RequestBody Map<String, String> requestBody) {
+        try {
+            String fileId = requestBody.get("fileId");
+            if (fileId == null || fileId.isEmpty()) {
+                return ResponseEntity.badRequest()
+                        .body(Collections.singletonMap("error", "File ID is required"));
+            }
+
+            // Retrieve the predesign URL from your service
+            String predesignUrl = fileStorageService.generatePresignedUrl(fileId);
+            // Create a response map
+            Map<String, String> response = new HashMap<>();
+            response.put("predesignUrl", predesignUrl);
+
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Collections.singletonMap("error", "Failed to generate predesign URL: " + e.getMessage()));
+        }
+    }
+
+
+
+    @PostMapping("/register-cos-uploads")
+    public ResponseEntity<?> registerCosUploads(@RequestBody QuestionImageUploadNotificationRequest request) {
+        try {
+            // Process the uploaded files information
+            Long assignmentId = request.getAssignmentId();
+            List<QuestionImageUpload> uploadResults = request.getUploadResults();
+
+            // Log or process the data as needed
+            System.out.println("Received notification for assignment: " + assignmentId);
+            System.out.println("Number of uploads: " + uploadResults.size());
+            List<QuestionImage> questionImages = questionImageService.saveQuestionImages(uploadResults, assignmentId);
+
+            // Return success response
+            return ResponseEntity.ok().body(questionImages);
+        } catch (Exception e) {
+            // Log the exception
+            System.err.println("Error processing upload notification: " + e.getMessage());
+            e.printStackTrace();
+
+            // Return error response
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Failed to process upload: " + e.getMessage());
+        }
+    }
+
+
+
 
 }

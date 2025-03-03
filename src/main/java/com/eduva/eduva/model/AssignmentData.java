@@ -51,6 +51,12 @@ public class AssignmentData{
     @Column(name = "rubric_content", columnDefinition = "TEXT")
     private String rubricContent;
 
+    @Column(name = "rubric_finished")
+    private boolean rubricFinished;
+
+    @Column(name = "rubric_type")
+    private String rubricType;
+
 
     // Getters and Setters
     public Long getId() {
@@ -147,6 +153,22 @@ public class AssignmentData{
 
     public void setProblemSetFiles(List<FileData> problemSetFiles) {
         this.problemSetFiles = problemSetFiles;
+    }
+
+    public boolean isRubricFinished() {
+        return rubricFinished;
+    }
+
+    public void setRubricFinished(boolean rubricFinished) {
+        this.rubricFinished = rubricFinished;
+    }
+
+    public String getRubricType() {
+        return rubricType;
+    }
+
+    public void setRubricType(String rubricType) {
+        this.rubricType = rubricType;
     }
 }
 

@@ -12,6 +12,7 @@ public class ClaudeQuestionInfo {
     private String maxGrade;
     private String preContext;
     private Boolean isPureText;
+    private String rubricType;
 
     public ClaudeQuestionInfo(
             String questionId,
@@ -21,7 +22,8 @@ public class ClaudeQuestionInfo {
             String explanation,
             String maxGrade,
             String preContext,
-            Boolean isPureText) {
+            Boolean isPureText,
+            String rubricType) {
 
         this.questionId = questionId;
         this.content = content;
@@ -31,10 +33,16 @@ public class ClaudeQuestionInfo {
         this.maxGrade = maxGrade;
         this.preContext = preContext;
         this.isPureText = isPureText;
+        this.rubricType = rubricType;
     }
 
     // You might also want a no-args constructor for frameworks like Spring/Jackson
     public ClaudeQuestionInfo() {
+    }
+
+    public ClaudeQuestionInfo(String questionId) {
+        this.questionId = questionId;
+        // Initialize other fields as needed
     }
 
     // Getters and setters
@@ -100,5 +108,21 @@ public class ClaudeQuestionInfo {
 
     public void setIsPureText(Boolean pureText) {
         isPureText = pureText;
+    }
+
+    public Boolean getPureText() {
+        return isPureText;
+    }
+
+    public void setPureText(Boolean pureText) {
+        isPureText = pureText;
+    }
+
+    public String getRubricType() {
+        return rubricType;
+    }
+
+    public void setRubricType(String rubricType) {
+        this.rubricType = rubricType;
     }
 }

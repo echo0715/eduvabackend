@@ -135,11 +135,25 @@ public class AssignmentService {
             ObjectMapper objectMapper = new ObjectMapper();
             String jsonRubricContent = objectMapper.writeValueAsString(formattedQuestions);
             assignment.setRubricContent(jsonRubricContent);
+            assignment.setRubricFinished(true);
+            assignment.setRubricType("upload");
         } else if (assignmentCreateRequest.getRubricOption().equals("create")) {
             List<ClaudeQuestionInfo> formattedQuestions = claudeService.formatQuestionsByAutoGenerateRubrics(fileContents, questionIds);
             ObjectMapper objectMapper = new ObjectMapper();
             String jsonRubricContent = objectMapper.writeValueAsString(formattedQuestions);
             assignment.setRubricContent(jsonRubricContent);
+            assignment.setRubricFinished(true);
+            assignment.setRubricType("create");
+        } else if (assignmentCreateRequest.getRubricOption().equals("handwriting")) {
+            List<ClaudeQuestionInfo> formattedQuestions = questionIds.stream()
+                    .map(ClaudeQuestionInfo::new)
+                    .toList();
+            formattedQuestions.forEach(question -> question.setRubricType("image"));
+            ObjectMapper objectMapper = new ObjectMapper();
+            String jsonRubricContent = objectMapper.writeValueAsString(formattedQuestions);
+            assignment.setRubricContent(jsonRubricContent);
+            assignment.setRubricFinished(false);
+            assignment.setRubricType("handwriting");
         }
 
         AssignmentData savedAssignment = assignmentRepository.save(assignment);
@@ -157,6 +171,17 @@ public class AssignmentService {
                 .collect(Collectors.toList());
 
         submissionRepository.saveAll(submissions);
+
+        if (assignmentCreateRequest.getRubricOption().equals("handwriting")) {
+            List<FileData> rubricList = savedAssignment.getRubricFiles();
+            List<String> fileIds = rubricList.stream().map(FileData::getFileId).collect(Collectors.toList());
+            String presignedUrl = fileStorageService.generatePresignedUrl(fileIds.get(0));
+            FileData rubricData = rubricList.get(0);
+            rubricData.setFileId(presignedUrl);
+            rubricList.set(0, rubricData);
+            savedAssignment.setRubricFiles(rubricList);
+        }
+
         return savedAssignment;
     }
 
@@ -248,6 +273,7 @@ public class AssignmentService {
         SubmissionData submissionData = submissionRepository.findById(submissionId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,"Submission not found"));
         String fileName = submissionData.getSubmitFileName();
+
         String presignedUrl = fileStorageService.generatePresignedUrl(fileName);
 
         System.out.println(presignedUrl);
