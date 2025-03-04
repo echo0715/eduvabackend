@@ -52,6 +52,8 @@ public class ClaudeService {
 
     @Autowired
     private OpenRouterService openRouterService;
+    @Autowired
+    private FileStorageService fileStorageService;
 
     public ClaudeService(RestTemplate restTemplate, ObjectMapper objectMapper, QuestionGradingRepository questionGradingRepository) {
         this.restTemplate = restTemplate;
@@ -283,7 +285,7 @@ public class ClaudeService {
 
 
 
-    public QuestionIdsWithCacheFiles extractQuestionIds(List<String> fileUrls, String prompt, Long teacherId) throws IOException {
+    public QuestionIdsWithCacheFiles extractQuestionIds(List<String> fileUrls, String prompt, Long teacherId, String rubricOption) throws IOException {
         List<Map<String, Object>> fileContents = processFiles(fileUrls);
         List<Map<String, Object>> content = new ArrayList<>(fileContents);
 
@@ -305,7 +307,14 @@ public class ClaudeService {
         messages.add(message);
 
 //        List<Map<String, Object>> tools = createExtractIdTools();
-        List<Map<String, Object>> tools = createQuestionFormatExtractIdAndGenerateRubricTools();
+        List<Map<String, Object>> tools;
+        if (rubricOption.equals("handwriting")) {
+            tools = createQuestionContentFormatAndExtractIdTools();
+        } else {
+            tools = createQuestionFormatExtractIdAndGenerateRubricTools();
+        }
+
+
 
 
         requestBody.put("messages", messages);
@@ -1061,7 +1070,7 @@ public class ClaudeService {
         requestBody.put("messages", messages);
 
         // Create tools for question formatting
-        List<Map<String, Object>> tools = createQuestionOnlyContentFormatTools();
+        List<Map<String, Object>> tools = createQuestionContentFormatAndExtractIdTools();
         requestBody.put("tools", tools);
 
         // Make API call
@@ -1161,32 +1170,74 @@ public class ClaudeService {
     private ClaudeQuestionInfo makeApiCallForGradeQuestion(List<Map<String, Object>> fileContents,
                                                       ClaudeQuestionInfo question, SubmissionData submissionData, Integer questionIndex) throws IOException {
 
+
         List<Map<String, Object>> content = new ArrayList<>(fileContents);
+
+        // Handle image rubric(s)
+        if (question.getRubricType().equals("image")) {
+            // Split the rubric string by semicolons to get multiple image paths
+            String[] imageIds = question.getRubric().split(";");
+
+            for (String imageId : imageIds) {
+                // Trim the imageId to remove any potential whitespace
+                String trimmedImageId = imageId.trim();
+                if (!trimmedImageId.isEmpty()) {
+                    String imageUrl = fileStorageService.generateImagePresignedUrl(trimmedImageId);
+
+                    // Create image content item
+                    Map<String, Object> imageContent = new HashMap<>();
+                    imageContent.put("type", "image");
+
+                    Map<String, Object> source = new HashMap<>();
+                    source.put("type", "url");
+                    source.put("url", imageUrl);
+
+                    imageContent.put("source", source);
+
+                    // Add image content to the content list
+                    content.add(imageContent);
+                }
+            }
+        }
 
         // Add text prompt with question-specific information
         Map<String, Object> textContent = new HashMap<>();
         textContent.put("type", "text");
+
+        // Modify prompt based on rubric type
+        String rubricText;
+        if (question.getRubricType().equals("image")) {
+            int imageCount = question.getRubric().split(";").length;
+            rubricText = String.format("Please refer to the %d image rubric%s I've attached",
+                    imageCount,
+                    imageCount > 1 ? "s" : "");
+        } else {
+            rubricText = question.getRubric();
+        }
+
         String questionPrompt = String.format("""
-            I want you to grade for the question %s from the student answer and output the json using the answer_grading_tool. Here are the steps you need to do:
-            1. First read the question context and question content and try to come up with a solution for this question for yourself
-            2. Find the corresponding rubric for question %s, read and understand the rubric for this question first and understand the grading and grading notes if any.
-            3. Grade the student's answer by your understanding and checking the rubric and then grade, please think critically and don't give the point too easy!! For your final grading, please provide with a grade and very concise explanation consists for your grading.
-            Here is the context you should know:
-            %s
-            Here is the question content:
-            %s,
-            Here is the rubric:
-            %s, and the max grade/ best level you can give for this question is %s,
-            
-            The student's answer is in the attached file. If student didn't do this question, give none to the grade and say "No related answer" in explanation.
-            """,
+        I want you to grade for the question %s from the student answer and output the json using the answer_grading_tool. Here are the steps you need to do:
+        1. First read the question context and question content and try to come up with a solution for this question for yourself
+        2. Find the corresponding rubric for question %s, read and understand the rubric for this question first and understand the grading and grading notes if any.
+        3. Grade the student's answer by your understanding and checking the rubric and then grade, please think critically and don't give the point too easy!! For your final grading, please provide with a grade and very concise explanation consists for your grading.
+        Here is the context you should know:
+        %s
+        Here is the question content:
+        %s,
+        Here is the rubric:
+        %s, and the max grade/ best level you can give for this question is %s,
+        
+        The student's answer is in the attached file. If student didn't do this question, give none to the grade and say "No related answer" in explanation.
+        """,
                 question.getQuestionId(),
                 question.getQuestionId(),
                 question.getPreContext(),
                 question.getContent(),
-                question.getRubric(),
+                rubricText,
                 question.getMaxGrade());
+
         textContent.put("text", questionPrompt);
+        content.add(textContent);
 
 //        Map<String, Object> cacheControl = new HashMap<>();
 //        cacheControl.put("type", "ephemeral");
@@ -1610,11 +1661,18 @@ public class ClaudeService {
         tools.add(tool);
         return tools;
     }
+
     private List<Map<String, Object>> createQuestionFormatExtractIdAndGenerateRubricTools(){
         List<Map<String, Object>> tools = new ArrayList<>();
         tools.add(createExtractIdTools().get(0));
         tools.add(createQuestionFormatTools().get(0));
         tools.add(createRubricGeneratingTools().get(0));
+        return tools;
+    }
+    private List<Map<String, Object>> createQuestionContentFormatAndExtractIdTools(){
+        List<Map<String, Object>> tools = new ArrayList<>();
+        tools.add(createExtractIdTools().get(0));
+        tools.add(createQuestionOnlyContentFormatTools().get(0));
         return tools;
     }
 

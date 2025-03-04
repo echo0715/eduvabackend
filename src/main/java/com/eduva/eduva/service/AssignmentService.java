@@ -124,7 +124,7 @@ public class AssignmentService {
 //        azureDocIntelligenceService.getFormatFigurePosition(fileUrls.get(0));
 
         String extractingIdPrompt = "I need to grade each question individually in a question set or an exam, or just an essay. Please identify the small unit of each question that requires separate grading, and output a json file contain those question IDs. In some cases, if there are big problem contain and multiple sub problem like (a),(b), (c) or (1), (2), (3),  please identify the question IDs to the smallest unit, which means like 3, 2(a), 4(1) etc.";
-        QuestionIdsWithCacheFiles questionIdsWithCacheFiles = claudeService.extractQuestionIds(fileUrls, extractingIdPrompt, assignmentCreateRequest.getTeacherId());
+        QuestionIdsWithCacheFiles questionIdsWithCacheFiles = claudeService.extractQuestionIds(fileUrls, extractingIdPrompt, assignmentCreateRequest.getTeacherId(), assignmentCreateRequest.getRubricOption());
 //        String questionIdsString = String.join(",", questionIds);
         List<String> questionIds = questionIdsWithCacheFiles.getQuestionIds();
         List<Map<String, Object>> fileContents = questionIdsWithCacheFiles.getProcessedFiles();

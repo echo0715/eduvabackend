@@ -55,6 +55,7 @@ public class QuestionImageService {
                 String questionId = question.getQuestionId();
                 if (questionIdToImageKeyMap.containsKey(questionId)) {
                     question.setRubric(questionIdToImageKeyMap.get(questionId));
+
                 }
             }
 
