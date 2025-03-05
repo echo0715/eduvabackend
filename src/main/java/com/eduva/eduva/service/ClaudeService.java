@@ -1170,126 +1170,129 @@ public class ClaudeService {
     private ClaudeQuestionInfo makeApiCallForGradeQuestion(List<Map<String, Object>> fileContents,
                                                       ClaudeQuestionInfo question, SubmissionData submissionData, Integer questionIndex) throws IOException {
 
+        try {
 
-        List<Map<String, Object>> content = new ArrayList<>(fileContents);
+            List<Map<String, Object>> content = new ArrayList<>(fileContents);
 
-        // Handle image rubric(s)
-        if (question.getRubricType().equals("image")) {
-            // Split the rubric string by semicolons to get multiple image paths
-            String[] imageIds = question.getRubric().split(";");
+            // Handle image rubric(s)
+            if (question.getRubricType().equals("image")) {
+                // Split the rubric string by semicolons to get multiple image paths
+                String[] imageIds = question.getRubric().split(";");
 
-            for (String imageId : imageIds) {
-                // Trim the imageId to remove any potential whitespace
-                String trimmedImageId = imageId.trim();
-                if (!trimmedImageId.isEmpty()) {
-                    String imageUrl = fileStorageService.generateImagePresignedUrl(trimmedImageId);
+                for (String imageId : imageIds) {
+                    // Trim the imageId to remove any potential whitespace
+                    String trimmedImageId = imageId.trim();
+                    if (!trimmedImageId.isEmpty()) {
+                        String imageUrl = fileStorageService.generateImagePresignedUrl(trimmedImageId);
 
-                    // Create image content item
-                    Map<String, Object> imageContent = new HashMap<>();
-                    imageContent.put("type", "image");
+                        // Create image content item
+                        Map<String, Object> imageContent = new HashMap<>();
+                        imageContent.put("type", "image");
 
-                    Map<String, Object> source = new HashMap<>();
-                    source.put("type", "url");
-                    source.put("url", imageUrl);
+                        Map<String, Object> source = new HashMap<>();
+                        source.put("type", "url");
+                        source.put("url", imageUrl);
 
-                    imageContent.put("source", source);
+                        imageContent.put("source", source);
 
-                    // Add image content to the content list
-                    content.add(imageContent);
+                        // Add image content to the content list
+                        content.add(imageContent);
+                    }
                 }
             }
-        }
 
-        // Add text prompt with question-specific information
-        Map<String, Object> textContent = new HashMap<>();
-        textContent.put("type", "text");
+            // Add text prompt with question-specific information
+            Map<String, Object> textContent = new HashMap<>();
+            textContent.put("type", "text");
 
-        // Modify prompt based on rubric type
-        String rubricText;
-        if (question.getRubricType().equals("image")) {
-            int imageCount = question.getRubric().split(";").length;
-            rubricText = String.format("Please refer to the %d image rubric%s I've attached",
-                    imageCount,
-                    imageCount > 1 ? "s" : "");
-        } else {
-            rubricText = question.getRubric();
-        }
+            // Modify prompt based on rubric type
+            String rubricText;
+            if (question.getRubricType().equals("image")) {
+                int imageCount = question.getRubric().split(";").length;
+                rubricText = String.format("Please refer to the %d image rubric%s I've attached",
+                        imageCount,
+                        imageCount > 1 ? "s" : "");
+            } else {
+                rubricText = question.getRubric();
+            }
 
-        String questionPrompt = String.format("""
-        I want you to grade for the question %s from the student answer and output the json using the answer_grading_tool. Here are the steps you need to do:
-        1. First read the question context and question content and try to come up with a solution for this question for yourself
-        2. Find the corresponding rubric for question %s, read and understand the rubric for this question first and understand the grading and grading notes if any.
-        3. Grade the student's answer by your understanding and checking the rubric and then grade, please think critically and don't give the point too easy!! For your final grading, please provide with a grade and very concise explanation consists for your grading.
-        Here is the context you should know:
-        %s
-        Here is the question content:
-        %s,
-        Here is the rubric:
-        %s, and the max grade/ best level you can give for this question is %s,
-        
-        The student's answer is in the attached file. If student didn't do this question, give none to the grade and say "No related answer" in explanation.
-        """,
-                question.getQuestionId(),
-                question.getQuestionId(),
-                question.getPreContext(),
-                question.getContent(),
-                rubricText,
-                question.getMaxGrade());
+            String questionPrompt = String.format("""
+                            I want you to grade for the question %s from the student answer and output the json using the answer_grading_tool. Here are the steps you need to do:
+                            1. First read the question context and question content and try to come up with a solution for this question for yourself
+                            2. Find the corresponding rubric for question %s, read and understand the rubric for this question first and understand the grading and grading notes if any.
+                            3. Grade the student's answer by your understanding and checking the rubric and then grade, please think critically and don't give the point too easy!! For your final grading, please provide with a grade and very concise explanation consists for your grading.
+                            Here is the context you should know:
+                            %s
+                            Here is the question content:
+                            %s,
+                            Here is the rubric:
+                            %s, and the max grade/ best level you can give for this question is %s,
+                                    
+                            The student's answer is in the attached file. If student didn't do this question, give none to the grade and say "No related answer" in explanation.
+                            """,
+                    question.getQuestionId(),
+                    question.getQuestionId(),
+                    question.getPreContext(),
+                    question.getContent(),
+                    rubricText,
+                    question.getMaxGrade());
 
-        textContent.put("text", questionPrompt);
-        content.add(textContent);
+            textContent.put("text", questionPrompt);
 
 //        Map<String, Object> cacheControl = new HashMap<>();
 //        cacheControl.put("type", "ephemeral");
 //        textContent.put("cache_control", cacheControl);
-        content.add(textContent);
-        // Create request body
-        Map<String, Object> requestBody = createGradeRequestBody(content);
+            content.add(textContent);
+            // Create request body
+            Map<String, Object> requestBody = createGradeRequestBody(content);
 
-        // Make API call
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.set("x-api-key", apiKey);
-        headers.set("anthropic-version", "2023-06-01");
+            // Make API call
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.set("x-api-key", apiKey);
+            headers.set("anthropic-version", "2023-06-01");
 
-        HttpEntity<String> entity = new HttpEntity<>(
-                objectMapper.writeValueAsString(requestBody),
-                headers
-        );
+            HttpEntity<String> entity = new HttpEntity<>(
+                    objectMapper.writeValueAsString(requestBody),
+                    headers
+            );
 
-        ResponseEntity<String> response = restTemplate.exchange(
-                apiUrl,
-                HttpMethod.POST,
-                entity,
-                String.class
-        );
+            ResponseEntity<String> response = restTemplate.exchange(
+                    apiUrl,
+                    HttpMethod.POST,
+                    entity,
+                    String.class
+            );
 
-        // Process response
-        String responseBody = response.getBody();
+            // Process response
+            String responseBody = response.getBody();
 
-        System.out.println(question.getQuestionId());
-        System.out.println(responseBody);
-        ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
-        System.out.println(objectMapper.writeValueAsString(claudeResponseBody));
+            System.out.println(question.getQuestionId());
+            System.out.println(responseBody);
+            ClaudeResponseBody claudeResponseBody = objectMapper.readValue(responseBody, ClaudeResponseBody.class);
+            System.out.println(objectMapper.writeValueAsString(claudeResponseBody));
 
-        saveUsageData(claudeResponseBody.getUsage(), submissionData.getAssignment().getCourse().getTeacher().getId());
+            saveUsageData(claudeResponseBody.getUsage(), submissionData.getAssignment().getCourse().getTeacher().getId());
 
-        // Process content items and extract question info
-        for (ClaudeContentItem item : claudeResponseBody.getContent()) {
-            if ("tool_use".equals(item.getType()) && item.getInput() != null) {
-                ClaudeQuestionInfo gradedQuestion = item.getInput().getQuestions().get(0);
+            // Process content items and extract question info
+            for (ClaudeContentItem item : claudeResponseBody.getContent()) {
+                if ("tool_use".equals(item.getType()) && item.getInput() != null) {
+                    ClaudeQuestionInfo gradedQuestion = item.getInput().getQuestions().get(0);
 
-                // Save question grading
-                QuestionGrading grading = new QuestionGrading();
-                grading.setSubmission(submissionData);
-                grading.setAssignmentId(submissionData.getAssignment().getId());
-                grading.setGrade(gradedQuestion.getGrade());
-                grading.setExplanation(gradedQuestion.getExplanation());
-                grading.setQuestionId(gradedQuestion.getQuestionId());
-                grading.setQuestion_order(questionIndex);
-                questionGradingRepository.save(grading);
-                return gradedQuestion;
+                    // Save question grading
+                    QuestionGrading grading = new QuestionGrading();
+                    grading.setSubmission(submissionData);
+                    grading.setAssignmentId(submissionData.getAssignment().getId());
+                    grading.setGrade(gradedQuestion.getGrade());
+                    grading.setExplanation(gradedQuestion.getExplanation());
+                    grading.setQuestionId(gradedQuestion.getQuestionId());
+                    grading.setQuestion_order(questionIndex);
+                    questionGradingRepository.save(grading);
+                    return gradedQuestion;
+                }
             }
+        }catch (Exception e) {
+            System.out.println(e.getMessage());
         }
 
         throw new IOException("No valid response received for question: " + question.getQuestionId());

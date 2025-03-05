@@ -6,6 +6,8 @@ public class ClaudeQuestionInfo {
     @JsonProperty("question_id")
     private String questionId;
     private String content;
+
+    // rubric contain the rubric image key
     private String rubric;
     private String grade;
     private String explanation;
@@ -13,6 +15,9 @@ public class ClaudeQuestionInfo {
     private String preContext;
     private Boolean isPureText;
     private String rubricType;
+
+    //rubric text contain the text version of the iage
+    private String rubricText;
 
     public ClaudeQuestionInfo(
             String questionId,
@@ -124,5 +129,13 @@ public class ClaudeQuestionInfo {
 
     public void setRubricType(String rubricType) {
         this.rubricType = rubricType;
+    }
+
+    public String getRubricText() {
+        return rubricText;
+    }
+
+    public void setRubricText(String rubricText) {
+        this.rubricText = rubricText;
     }
 }

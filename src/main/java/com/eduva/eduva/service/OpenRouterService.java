@@ -296,6 +296,9 @@ public class OpenRouterService {
                     question.getMaxGrade(),
                     studentResponse);
 
+            System.out.println(questionPrompt);
+            System.out.println("sadfasfasd");
+
             // Set up headers
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);

@@ -189,6 +189,8 @@ public class AssignmentController {
 
     @PostMapping("/images")
     public ResponseEntity<Map<String, String>> getImageUrls(@RequestBody List<Map<String, Object>> imageQuestions) {
+
+        System.out.println(imageQuestions.toString());
         Map<String, String> result = new HashMap<>();
 
         for (Map<String, Object> question : imageQuestions) {
@@ -198,9 +200,12 @@ public class AssignmentController {
             // Generate or retrieve the URL for this image key
             String imageUrl = fileStorageService.generateImagePresignedUrl(imageKey);
 
-            result.put(questionId, imageUrl);
+            // Create a unique key combining question ID and image key
+            String resultKey = questionId + "_" + imageKey;
+            result.put(resultKey, imageUrl);
         }
 
+        System.out.println(result.toString());
         return ResponseEntity.ok(result);
     }
 }

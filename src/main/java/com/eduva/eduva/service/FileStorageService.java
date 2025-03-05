@@ -49,7 +49,7 @@ public class FileStorageService {
         // Initialize COS Client
         COSCredentials credentials = new BasicCOSCredentials(secretId, secretKey);
         ClientConfig clientConfig = new ClientConfig(new Region(region));
-        clientConfig.setHttpProtocol(HttpProtocol.http);
+        clientConfig.setHttpProtocol(HttpProtocol.https);
 
         String serviceApiEndpoint = "service.cos.myqcloud.com";
         String userEndpoint = customDomain;
@@ -57,23 +57,6 @@ public class FileStorageService {
         clientConfig.setEndpointBuilder(endPointBuilder);
 
         this.cosClient = new COSClient(credentials, clientConfig);
-    }
-
-    private void configureBucketDomain() {
-        try {
-            BucketDomainConfiguration configuration = new BucketDomainConfiguration();
-            DomainRule domainRule = new DomainRule();
-            domainRule.setStatus(DomainRule.ENABLED);
-            domainRule.setType(DomainRule.REST);
-            domainRule.setName(customDomain);
-            domainRule.setForcedReplacement(DomainRule.CNAME);
-
-            configuration.getDomainRules().add(domainRule);
-            cosClient.setBucketDomainConfiguration(bucketName, configuration);
-        } catch (Exception e) {
-            // Log the error but don't fail initialization
-            System.err.println("Failed to configure custom domain: " + e.getMessage());
-        }
     }
 
 
